@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tutor-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tutor-platform
+  template:
+    metadata:
+      labels:
+        app: tutor-platform
+    spec:
+      containers:
+        - name: tutor-platform
+          image: tutor-platform:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SERVER_PORT
+              value: "8080"
+
+            - name: SPRING_DATASOURCE_URL
+              value: "jdbc:postgresql://postgres:5432/tutor_platform"
+
+            - name: SPRING_DATASOURCE_USERNAME
+              value: "thanhvan1509"
+
+            - name: SPRING_DATASOURCE_PASSWORD
+              value: "thanhvan1509"
+
+            - name: JWT_SECRET
+              value: "change-me-to-a-long-random-secret-at-least-32-bytes"
+
+            - name: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+              value: "60"
+
+            - name: SPRING_JPA_HIBERNATE_DDL_AUTO
+              value: "validate"
+
+            - name: SPRING_FLYWAY_ENABLED
+              value: "true"
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tutor-platform
+spec:
+  selector:
+    app: tutor-platform
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30080
+  type: NodePort
