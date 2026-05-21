@@ -61,7 +61,8 @@ public class RefreshTokenService {
       throw invalidRefreshToken();
     }
     if (Boolean.TRUE.equals(tokenRow.get("revoked"))) {
-      throw new BusinessException("REFRESH_TOKEN_REVOKED", "Refresh token đã bị thu hồi.", HttpStatus.UNAUTHORIZED);
+      revokeAllForUser(userId, "Phát hiện refresh token đã bị dùng lại, thu hồi toàn bộ phiên.");
+      throw new BusinessException("REFRESH_TOKEN_REUSE_DETECTED", "Refresh token đã bị thu hồi và có dấu hiệu dùng lại.", HttpStatus.UNAUTHORIZED);
     }
     OffsetDateTime expiresAt = (OffsetDateTime) tokenRow.get("expiresAt");
     if (expiresAt == null || expiresAt.isBefore(OffsetDateTime.now())) {
@@ -78,6 +79,11 @@ public class RefreshTokenService {
         set revoked = true, revoked_at = now(), replaced_by_token_id = ?
         where id = ?
         """, newTokenId, tokenRow.get("id"));
+    jdbc.update("""
+        update user_sessions
+        set status = 'revoked', revoked_at = now(), last_seen_at = now()
+        where refresh_token_id = ?
+        """, tokenRow.get("id"));
     db.audit(userId, role, "auth.refresh_token_rotate", "refreshToken", (UUID) tokenRow.get("id"), "Refresh token được xoay vòng an toàn.");
     return new TokenPair(jwtService.accessToken(userId.toString(), role), newRefreshToken);
   }
@@ -86,11 +92,20 @@ public class RefreshTokenService {
   public void revoke(String rawRefreshToken) {
     Claims claims = parseRefreshClaims(rawRefreshToken);
     UUID userId = UUID.fromString(claims.getSubject());
+    String tokenHash = hash(rawRefreshToken);
+    UUID tokenId = db.optional("select id from refresh_tokens where token_hash = ?", (rs, row) -> rs.getObject("id", UUID.class), tokenHash).orElse(null);
     int updated = jdbc.update("""
         update refresh_tokens
         set revoked = true, revoked_at = now()
         where token_hash = ? and revoked = false
-        """, hash(rawRefreshToken));
+        """, tokenHash);
+    if (tokenId != null) {
+      jdbc.update("""
+          update user_sessions
+          set status = 'revoked', revoked_at = now(), last_seen_at = now()
+          where refresh_token_id = ?
+          """, tokenId);
+    }
     if (updated > 0) {
       db.audit(userId, String.valueOf(claims.get("role")), "auth.refresh_token_revoke", "user", userId, "Refresh token đã được thu hồi.");
     }
@@ -102,6 +117,11 @@ public class RefreshTokenService {
         update refresh_tokens
         set revoked = true, revoked_at = now()
         where user_id = ? and revoked = false
+        """, userId);
+    jdbc.update("""
+        update user_sessions
+        set status = 'revoked', revoked_at = now(), last_seen_at = now()
+        where user_id = ? and status = 'active'
         """, userId);
     db.userById(userId).ifPresent(user ->
         db.audit(userId, user.get("role").toString(), "auth.refresh_token_revoke_all", "user", userId, reason));
@@ -115,11 +135,16 @@ public class RefreshTokenService {
 
   private UUID store(UUID userId, String rawToken, String ipAddress, String userAgent) {
     Claims claims = parseRefreshClaims(rawToken);
-    return jdbc.queryForObject("""
+    UUID tokenId = jdbc.queryForObject("""
         insert into refresh_tokens(user_id, token_hash, expires_at, created_at, ip_address, user_agent)
         values (?, ?, ?, now(), ?, ?)
         returning id
         """, UUID.class, userId, hash(rawToken), claims.getExpiration().toInstant().atOffset(java.time.ZoneOffset.UTC), ipAddress, userAgent);
+    jdbc.update("""
+        insert into user_sessions(user_id, refresh_token_id, ip_address, user_agent, status, created_at, last_seen_at)
+        values (?, ?, ?, ?, 'active', now(), now())
+        """, userId, tokenId, ipAddress, userAgent);
+    return tokenId;
   }
 
   private Map<String, Object> activeUser(UUID userId) {

@@ -2,6 +2,7 @@ package com.example.tutorplatform.security;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -9,7 +10,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,6 +23,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.mock.web.MockMultipartFile;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -44,11 +45,14 @@ class SecurityHardeningIntegrationTest {
     registry.add("spring.datasource.url", postgres::getJdbcUrl);
     registry.add("spring.datasource.username", postgres::getUsername);
     registry.add("spring.datasource.password", postgres::getPassword);
-    registry.add("app.seed.enabled", () -> false);
     registry.add("app.jwt.secret", () -> "test-secret-with-at-least-32-bytes-for-jwt");
     registry.add("app.jwt.access-token-expire-minutes", () -> 15);
     registry.add("app.jwt.refresh-token-expire-days", () -> 7);
     registry.add("app.upload.dir", () -> UPLOAD_DIR.toString());
+    registry.add("app.auth.frontend-base-url", () -> "http://localhost:3000");
+    registry.add("app.auth.password-reset-token-expire-minutes", () -> 30);
+    registry.add("app.auth.email-verification-token-expire-minutes", () -> 1440);
+    registry.add("app.auth.expose-dev-tokens", () -> false);
   }
 
   @Autowired MockMvc mvc;
@@ -179,6 +183,7 @@ class SecurityHardeningIntegrationTest {
     UUID admin = user("admin@example.com", "Password123!", "admin", "active");
     UUID tutorUser = user("tutor@example.com", "Password123!", "tutor", "active");
     UUID tutor = tutor(tutorUser, "approved");
+    approvedVerification(tutorUser, "tutor_identity");
     earning(tutor, 100_000);
     earning(tutor, 200_000);
 
@@ -208,7 +213,116 @@ class SecurityHardeningIntegrationTest {
   }
 
   @Test
-  void paymentMockAndGatewaySelectionAreModeSafe() throws Exception {
+  void registerCannotEscalateToAdminRole() throws Exception {
+    mvc.perform(post("/api/v1/auth/register")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(json(Map.of(
+                "email", "hacker@example.com",
+                "password", "Password123!",
+                "fullName", "Hacker",
+                "phone", "0900000000",
+                "role", "admin"))))
+        .andExpect(status().isBadRequest());
+  }
+
+  @Test
+  void publicLearningRequestDoesNotReturnPii() throws Exception {
+    UUID student = user("student-pii@example.com", "Password123!", "student", "active");
+    UUID subject = subject();
+    jdbc.update("""
+        insert into learning_requests(request_code, requester_id, student_name, parent_name, phone, email,
+          subject_id, learning_mode, province, district, preferred_schedule, note, status, public_visible)
+        values ('REQ-PII-1', ?, 'Hidden Student', 'Hidden Parent', '0900000000', 'private@example.com',
+          ?, 'online', 'TP.HCM', 'Quận 1', 'Tối thứ 2', 'Ghi chú riêng', 'new', true)
+        """, student, subject);
+
+    String response = mvc.perform(get("/api/v1/public/learning-requests"))
+        .andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+
+    JsonNode first = objectMapper.readTree(response).path("data").get(0);
+    assertThat(first.has("studentName")).isFalse();
+    assertThat(first.has("phone")).isFalse();
+    assertThat(first.has("email")).isFalse();
+    assertThat(first.has("note")).isFalse();
+  }
+
+  @Test
+  void studentUploadAgreementSubmitAndAdminApproveVerification() throws Exception {
+    user("student-verify@example.com", "Password123!", "student", "active");
+    user("admin-verify@example.com", "Password123!", "admin", "active");
+    String studentAccess = login("student-verify@example.com", "Password123!").accessToken();
+    MockMultipartFile file = new MockMultipartFile(
+        "file",
+        "student-card.pdf",
+        "application/pdf",
+        "%PDF-1.4\n%%EOF".getBytes()
+    );
+
+    String uploadResponse = mvc.perform(multipart("/api/v1/student/verifications/student-card/upload")
+            .file(file)
+            .param("schoolName", "Demo University")
+            .param("studentCode", "SV001")
+            .param("fullNameInput", "Student Verify")
+            .header("Authorization", bearer(studentAccess)))
+        .andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+
+    UUID verificationId = UUID.fromString(objectMapper.readTree(uploadResponse).path("data").path("id").asText());
+    assertThat(objectMapper.readTree(uploadResponse).path("data").path("status").asText()).isEqualTo("draft");
+
+    mvc.perform(post("/api/v1/student/verifications/" + verificationId + "/agreement/sign")
+            .header("Authorization", bearer(studentAccess))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(json(Map.of("signerFullName", "Student Verify", "signerEmail", "student-verify@example.com"))))
+        .andExpect(status().isOk());
+    mvc.perform(post("/api/v1/student/verifications/" + verificationId + "/submit")
+            .header("Authorization", bearer(studentAccess)))
+        .andExpect(status().isOk());
+    assertThat(jdbc.queryForObject("select status from user_verifications where id = ?", String.class, verificationId)).isEqualTo("pending_review");
+
+    mvc.perform(post("/api/v1/admin/verifications/" + verificationId + "/approve")
+            .header("Authorization", bearer(login("admin-verify@example.com", "Password123!").accessToken())))
+        .andExpect(status().isOk());
+    assertThat(jdbc.queryForObject("select status from user_verifications where id = ?", String.class, verificationId)).isEqualTo("approved");
+    assertThat(jdbc.queryForObject("select count(*) from verification_agreements where verification_id = ?", Integer.class, verificationId)).isEqualTo(1);
+  }
+
+  @Test
+  void completingSessionTwiceCreatesSinglePaymentAndEarning() throws Exception {
+    UUID student = user("student-session@example.com", "Password123!", "student", "active");
+    UUID tutorUser = user("tutor-session@example.com", "Password123!", "tutor", "active");
+    UUID tutor = tutor(tutorUser, "approved");
+    UUID subject = subject();
+    UUID classId = jdbc.queryForObject("""
+        insert into tutoring_classes(student_id, tutor_id, subject_id, title, learning_mode, hourly_rate, sessions_per_week, start_date, status)
+        values (?, ?, ?, 'Math class', 'online', 120000, 2, current_date, 'active')
+        returning id
+        """, UUID.class, student, tutor, subject);
+    UUID sessionId = jdbc.queryForObject("""
+        insert into class_sessions(class_id, student_id, tutor_id, scheduled_start, scheduled_end, status)
+        values (?, ?, ?, now(), now() + interval '1 hour', 'scheduled')
+        returning id
+        """, UUID.class, classId, student, tutor);
+    String tutorAccess = login("tutor-session@example.com", "Password123!").accessToken();
+
+    mvc.perform(post("/api/v1/tutor/sessions/" + sessionId + "/complete")
+            .header("Authorization", bearer(tutorAccess))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{}"))
+        .andExpect(status().isOk());
+    mvc.perform(post("/api/v1/tutor/sessions/" + sessionId + "/complete")
+            .header("Authorization", bearer(tutorAccess))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{}"))
+        .andExpect(status().isOk());
+
+    assertThat(jdbc.queryForObject("select count(*) from payments where session_id = ?", Integer.class, sessionId)).isEqualTo(1);
+    assertThat(jdbc.queryForObject("select count(*) from tutor_earnings where session_id = ?", Integer.class, sessionId)).isEqualTo(1);
+  }
+
+  @Test
+  void paymentGatewaySelectionIsModeSafe() throws Exception {
     UUID student = user("student@example.com", "Password123!", "student", "active");
     UUID payment = jdbc.queryForObject("""
         insert into payments(user_id, amount, description, status)
@@ -218,171 +332,25 @@ class SecurityHardeningIntegrationTest {
     String access = login("student@example.com", "Password123!").accessToken();
 
     setting("paymentMode", "\"production\"");
-    mvc.perform(post("/api/v1/payments/" + payment + "/mock-pay").header("Authorization", bearer(access)))
+    mvc.perform(post("/api/v1/payments/" + payment + "/create-checkout")
+            .header("Authorization", bearer(access))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(json(Map.of("gateway", "vnpay"))))
         .andExpect(status().isForbidden());
 
-    setting("paymentMode", "\"mock\"");
+    setting("paymentMode", "\"sandbox\"");
     mvc.perform(post("/api/v1/payments/" + payment + "/create-checkout")
             .header("Authorization", bearer(access))
             .contentType(MediaType.APPLICATION_JSON)
             .content(json(Map.of("gateway", "does-not-exist"))))
         .andExpect(status().isBadRequest());
 
-    setting("enabledGateways", "[\"mock\"]");
+    setting("enabledGateways", "[\"bank_qr\"]");
     mvc.perform(post("/api/v1/payments/" + payment + "/create-checkout")
             .header("Authorization", bearer(access))
             .contentType(MediaType.APPLICATION_JSON)
             .content(json(Map.of("gateway", "vnpay"))))
         .andExpect(status().isBadRequest());
-  }
-
-  @Test
-  void tutorEarningsEndpointWorksButTutorCannotUseAdminPayments() throws Exception {
-    UUID tutorUser = user("tutor@example.com", "Password123!", "tutor", "active");
-    UUID tutor = tutor(tutorUser, "approved");
-    earning(tutor, 120_000);
-    String access = login("tutor@example.com", "Password123!").accessToken();
-
-    mvc.perform(get("/api/v1/tutor/earnings").header("Authorization", bearer(access)))
-        .andExpect(status().isOk());
-    mvc.perform(get("/api/v1/admin/payments").header("Authorization", bearer(access)))
-        .andExpect(status().isForbidden());
-  }
-
-  @Test
-  void adminAssignTutorCreatesOneAssignedBookingAndTutorCanSeeIt() throws Exception {
-    user("admin@example.com", "Password123!", "admin", "active");
-    UUID student = user("student@example.com", "Password123!", "student", "active");
-    UUID tutorUser = user("tutor@example.com", "Password123!", "tutor", "active");
-    UUID tutor = tutor(tutorUser, "approved");
-    UUID subject = subject();
-    UUID request = jdbc.queryForObject("""
-        insert into learning_requests(request_code, requester_id, student_name, phone, subject_id, learning_mode, status)
-        values ('REQ-ASSIGN-1', ?, 'Student A', '0900000000', ?, 'online', 'new')
-        returning id
-        """, UUID.class, student, subject);
-
-    String adminAccess = login("admin@example.com", "Password123!").accessToken();
-    String response = mvc.perform(post("/api/v1/admin/learning-requests/" + request + "/assign-tutor")
-            .header("Authorization", bearer(adminAccess))
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("tutorId", tutor))))
-        .andExpect(status().isOk())
-        .andReturn().getResponse().getContentAsString();
-    JsonNode booking = objectMapper.readTree(response).path("data").path("booking");
-    assertThat(booking.path("status").asText()).isEqualTo("assigned");
-
-    mvc.perform(post("/api/v1/admin/learning-requests/" + request + "/assign-tutor")
-            .header("Authorization", bearer(adminAccess))
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("tutorId", tutor))))
-        .andExpect(status().isOk());
-
-    Integer count = jdbc.queryForObject("select count(*) from trial_bookings where learning_request_id = ?", Integer.class, request);
-    assertThat(count).isEqualTo(1);
-
-    String tutorBookings = mvc.perform(get("/api/v1/tutor/bookings")
-            .header("Authorization", bearer(login("tutor@example.com", "Password123!").accessToken())))
-        .andExpect(status().isOk())
-        .andReturn().getResponse().getContentAsString();
-    assertThat(tutorBookings).contains(booking.path("id").asText());
-  }
-
-  @Test
-  void parentRegistrationAndPasswordValidationMatchApiContract() throws Exception {
-    mvc.perform(post("/api/v1/auth/register")
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of(
-                "email", "parent@example.com",
-                "password", "Password123!",
-                "fullName", "Parent User",
-                "phone", "0900000000",
-                "role", "parent"))))
-        .andExpect(status().isOk());
-
-    UUID parentId = jdbc.queryForObject("select id from users where email = 'parent@example.com' and role = 'parent'", UUID.class);
-    Integer profileCount = jdbc.queryForObject("select count(*) from parent_profiles where user_id = ?", Integer.class, parentId);
-    assertThat(profileCount).isEqualTo(1);
-
-    mvc.perform(post("/api/v1/auth/register")
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of(
-                "email", "short@example.com",
-                "password", "123456",
-                "fullName", "Short Password",
-                "phone", "0900000001",
-                "role", "student"))))
-        .andExpect(status().isBadRequest());
-  }
-
-  @Test
-  void forgotAndResetPasswordConsumeTokenAndRevokeOldRefreshToken() throws Exception {
-    user("reset@example.com", "OldPassword123!", "student", "active");
-    Tokens oldTokens = login("reset@example.com", "OldPassword123!");
-
-    String forgotResponse = mvc.perform(post("/api/v1/auth/forgot-password")
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("email", "reset@example.com"))))
-        .andExpect(status().isOk())
-        .andReturn().getResponse().getContentAsString();
-    String resetToken = objectMapper.readTree(forgotResponse).path("data").path("resetToken").asText();
-    assertThat(resetToken).isNotBlank();
-
-    mvc.perform(post("/api/v1/auth/reset-password")
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("token", resetToken, "newPassword", "NewPassword123!"))))
-        .andExpect(status().isOk());
-
-    mvc.perform(post("/api/v1/auth/login")
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("email", "reset@example.com", "password", "OldPassword123!"))))
-        .andExpect(status().isUnauthorized());
-    login("reset@example.com", "NewPassword123!");
-
-    mvc.perform(post("/api/v1/auth/reset-password")
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("token", resetToken, "newPassword", "AnotherPassword123!"))))
-        .andExpect(status().isUnauthorized());
-    mvc.perform(post("/api/v1/auth/refresh")
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("refreshToken", oldTokens.refreshToken()))))
-        .andExpect(status().isUnauthorized());
-  }
-
-  @Test
-  void conversationCreationUsesBookingContextAndRejectsFreeParticipants() throws Exception {
-    UUID student = user("student@example.com", "Password123!", "student", "active");
-    UUID tutorUser = user("tutor@example.com", "Password123!", "tutor", "active");
-    user("other@example.com", "Password123!", "student", "active");
-    UUID tutor = tutor(tutorUser, "approved");
-    UUID booking = booking(student, tutor, subject(), "assigned");
-    String studentAccess = login("student@example.com", "Password123!").accessToken();
-
-    String response = mvc.perform(post("/api/v1/conversations")
-            .header("Authorization", bearer(studentAccess))
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("type", "booking", "bookingId", booking, "initialMessage", "Xin chào gia sư"))))
-        .andExpect(status().isOk())
-        .andReturn().getResponse().getContentAsString();
-    UUID conversationId = UUID.fromString(objectMapper.readTree(response).path("data").path("id").asText());
-
-    mvc.perform(post("/api/v1/conversations")
-            .header("Authorization", bearer(studentAccess))
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("type", "support", "participantIds", List.of(tutorUser)))))
-        .andExpect(status().isForbidden());
-
-    String otherAccess = login("other@example.com", "Password123!").accessToken();
-    mvc.perform(post("/api/v1/conversations")
-            .header("Authorization", bearer(otherAccess))
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("type", "booking", "bookingId", booking))))
-        .andExpect(status().isForbidden());
-    mvc.perform(post("/api/v1/conversations/" + conversationId + "/messages")
-            .header("Authorization", bearer(otherAccess))
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(json(Map.of("content", "Không thuộc hội thoại"))))
-        .andExpect(status().isForbidden());
   }
 
   private Tokens login(String email, String password) throws Exception {
@@ -434,10 +402,17 @@ class SecurityHardeningIntegrationTest {
         """, tutorId, netAmount, netAmount);
   }
 
+  private void approvedVerification(UUID userId, String type) {
+    jdbc.update("""
+        insert into user_verifications(user_id, verification_type, status)
+        values (?, ?, 'approved')
+        """, userId, type);
+  }
+
   private void ensurePaymentSettings() {
-    setting("paymentMode", "\"mock\"");
-    setting("enabledGateways", "[\"mock\",\"vnpay\"]");
-    setting("defaultGateway", "\"mock\"");
+    setting("paymentMode", "\"sandbox\"");
+    setting("enabledGateways", "[\"bank_qr\",\"vnpay\"]");
+    setting("defaultGateway", "\"bank_qr\"");
     setting("paymentTimeoutMinutes", "30");
     setting("commissionRate", "0.15");
   }

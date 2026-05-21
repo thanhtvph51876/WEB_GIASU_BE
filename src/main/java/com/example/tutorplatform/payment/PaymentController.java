@@ -1,8 +1,6 @@
 package com.example.tutorplatform.payment;
 
 import com.example.tutorplatform.common.ApiResponse;
-import com.example.tutorplatform.dto.payment.CreateCheckoutRequest;
-import jakarta.validation.Valid;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,8 +28,8 @@ public class PaymentController {
   }
 
   @PostMapping("/payments/{paymentId}/create-checkout")
-  public ApiResponse<Map<String, Object>> createCheckout(@PathVariable UUID paymentId, @Valid @RequestBody(required = false) CreateCheckoutRequest body) {
-    return ApiResponse.ok(paymentService.createCheckout(paymentId, body == null ? Map.of() : body.toMap()), "Đã tạo phiên thanh toán.");
+  public ApiResponse<Map<String, Object>> createCheckout(@PathVariable UUID paymentId, @RequestBody(required = false) Map<String, Object> body) {
+    return ApiResponse.ok(paymentService.createCheckout(paymentId, body == null ? Map.of() : body), "Đã tạo phiên thanh toán.");
   }
 
   @GetMapping("/payments/{paymentId}/status")

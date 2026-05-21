@@ -31,8 +31,8 @@ public class GlobalExceptionHandler {
 
   @ExceptionHandler(DuplicateKeyException.class)
   public ResponseEntity<ApiResponse<Void>> duplicate(DuplicateKeyException ex) {
-    return ResponseEntity.status(HttpStatus.CONFLICT)
-        .body(ApiResponse.error("CONFLICT", "Dữ liệu đã tồn tại.", null));
+    return ResponseEntity.badRequest()
+        .body(ApiResponse.error("DUPLICATE_VALUE", "Dữ liệu đã tồn tại.", null));
   }
 
   @ExceptionHandler(Exception.class)

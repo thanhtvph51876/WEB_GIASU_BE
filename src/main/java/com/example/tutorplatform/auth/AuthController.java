@@ -1,9 +1,9 @@
 package com.example.tutorplatform.auth;
 
-import com.fasterxml.jackson.annotation.JsonAlias;
 import com.example.tutorplatform.common.ApiResponse;
 import com.example.tutorplatform.common.BusinessException;
 import com.example.tutorplatform.common.ForbiddenException;
+import com.example.tutorplatform.config.AppProperties;
 import com.example.tutorplatform.db.DbService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -15,12 +15,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.OffsetDateTime;
-import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Base64;
 import java.util.UUID;
-import org.springframework.core.env.Environment;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -38,15 +37,15 @@ public class AuthController {
   private final JdbcTemplate jdbc;
   private final PasswordEncoder passwordEncoder;
   private final RefreshTokenService refreshTokenService;
-  private final Environment environment;
+  private final AppProperties properties;
   private final SecureRandom secureRandom = new SecureRandom();
 
-  public AuthController(DbService db, PasswordEncoder passwordEncoder, RefreshTokenService refreshTokenService, Environment environment) {
+  public AuthController(DbService db, PasswordEncoder passwordEncoder, RefreshTokenService refreshTokenService, AppProperties properties) {
     this.db = db;
     this.jdbc = db.jdbc();
     this.passwordEncoder = passwordEncoder;
     this.refreshTokenService = refreshTokenService;
-    this.environment = environment;
+    this.properties = properties;
   }
 
   @PostMapping("/register")
@@ -76,12 +75,13 @@ public class AuthController {
           values (?, '', '', 'other', '', '', 'draft')
           """, userId);
     }
-    String verificationToken = createEmailVerificationToken(userId);
 
     Map<String, Object> user = db.userById(userId).orElseThrow();
+    Map<String, Object> verification = createEmailVerificationToken(userId, request.email(), servletRequest);
     db.audit(userId, request.role(), "auth.register", "user", userId, "Người dùng đăng ký tài khoản mới.");
     Map<String, Object> payload = authPayload(user, servletRequest);
-    if (exposeDevTokens()) payload.put("emailVerificationToken", verificationToken);
+    payload.put("emailVerificationRequired", true);
+    includeDevToken(payload, "emailVerification", verification);
     return ApiResponse.ok(payload, "Đăng ký thành công");
   }
 
@@ -127,38 +127,58 @@ public class AuthController {
   }
 
   @PostMapping("/forgot-password")
-  public ApiResponse<Map<String, Object>> forgotPassword(@Valid @RequestBody ForgotPasswordRequest request) {
-    Map<String, Object> data = new LinkedHashMap<>();
-    data.put("accepted", true);
-    db.userByEmail(request.email()).ifPresent(user -> {
+  @Transactional
+  public ApiResponse<Map<String, Object>> forgotPassword(@RequestBody Map<String, Object> body, HttpServletRequest servletRequest) {
+    String email = firstString(body, "email");
+    if (email == null) {
+      throw new BusinessException("EMAIL_REQUIRED", "Vui lòng nhập email.");
+    }
+    String normalizedEmail = email.trim().toLowerCase();
+    Map<String, Object> response = new LinkedHashMap<>();
+    response.put("accepted", true);
+    db.userByEmail(normalizedEmail).ifPresent(user -> {
       UUID userId = UUID.fromString(user.get("id").toString());
-      String token = randomToken();
-      jdbc.update("""
-          insert into password_reset_tokens(user_id, token_hash, expires_at)
-          values (?, ?, now() + interval '30 minutes')
-          """, userId, hash(token));
+      Map<String, Object> reset = createPasswordResetToken(userId, normalizedEmail, servletRequest);
+      includeDevToken(response, "passwordReset", reset);
       db.audit(userId, user.get("role").toString(), "auth.password_reset_requested", "user", userId, "Người dùng yêu cầu đặt lại mật khẩu.");
-      if (exposeDevTokens()) data.put("resetToken", token);
     });
-    return ApiResponse.ok(data, "Đã ghi nhận yêu cầu đặt lại mật khẩu.");
+    return ApiResponse.ok(response, "Nếu email tồn tại, hệ thống đã tạo hướng dẫn đặt lại mật khẩu.");
   }
 
   @PostMapping("/reset-password")
   @Transactional
-  public ApiResponse<Map<String, Object>> resetPassword(@Valid @RequestBody ResetPasswordRequest request) {
-    UUID userId = consumeToken("password_reset_tokens", request.token());
-    jdbc.update("update users set password_hash = ?, updated_at = now() where id = ?", passwordEncoder.encode(request.password()), userId);
-    refreshTokenService.revokeAllForUser(userId, "Người dùng đặt lại mật khẩu, thu hồi toàn bộ refresh token.");
-    db.userById(userId).ifPresent(user -> db.audit(userId, user.get("role").toString(), "auth.password_reset_completed", "user", userId, "Người dùng đặt lại mật khẩu thành công."));
-    return ApiResponse.ok(Map.of("accepted", true), "Mật khẩu đã được cập nhật.");
+  public ApiResponse<Map<String, Object>> resetPassword(@RequestBody Map<String, Object> body) {
+    String token = firstString(body, "token");
+    String newPassword = firstString(body, "newPassword", "password");
+    if (token == null) {
+      throw new BusinessException("TOKEN_REQUIRED", "Token đặt lại mật khẩu là bắt buộc.");
+    }
+    if (newPassword == null || newPassword.length() < 8) {
+      throw new BusinessException("WEAK_PASSWORD", "Mật khẩu mới tối thiểu 8 ký tự.");
+    }
+    Map<String, Object> row = validPasswordResetToken(token);
+    UUID userId = (UUID) row.get("userId");
+    jdbc.update("update users set password_hash = ?, updated_at = now() where id = ?", passwordEncoder.encode(newPassword), userId);
+    jdbc.update("update password_reset_tokens set used_at = now() where id = ?", row.get("id"));
+    refreshTokenService.revokeAllForUser(userId, "Mật khẩu đã được đặt lại, thu hồi toàn bộ refresh token cũ.");
+    db.userById(userId).ifPresent(user ->
+        db.audit(userId, user.get("role").toString(), "auth.password_reset_completed", "user", userId, "Người dùng đặt lại mật khẩu thành công."));
+    return ApiResponse.ok(Map.of("accepted", true), "Đặt lại mật khẩu thành công.");
   }
 
   @PostMapping("/verify-email")
   @Transactional
-  public ApiResponse<Map<String, Object>> verifyEmail(@Valid @RequestBody VerifyEmailRequest request) {
-    UUID userId = consumeToken("email_verification_tokens", request.token());
+  public ApiResponse<Map<String, Object>> verifyEmail(@RequestBody Map<String, Object> body) {
+    String token = firstString(body, "token");
+    if (token == null) {
+      throw new BusinessException("TOKEN_REQUIRED", "Token xác minh email là bắt buộc.");
+    }
+    Map<String, Object> row = validEmailVerificationToken(token);
+    UUID userId = (UUID) row.get("userId");
     jdbc.update("update users set email_verified = true, updated_at = now() where id = ?", userId);
-    db.userById(userId).ifPresent(user -> db.audit(userId, user.get("role").toString(), "auth.email_verified", "user", userId, "Người dùng xác minh email thành công."));
+    jdbc.update("update email_verification_tokens set used_at = now() where id = ?", row.get("id"));
+    db.userById(userId).ifPresent(user ->
+        db.audit(userId, user.get("role").toString(), "auth.email_verified", "user", userId, "Người dùng xác minh email thành công."));
     return ApiResponse.ok(Map.of("verified", true), "Email đã được xác minh.");
   }
 
@@ -188,37 +208,92 @@ public class AuthController {
     return request.getHeader("User-Agent");
   }
 
-  private String createEmailVerificationToken(UUID userId) {
+  private Map<String, Object> createPasswordResetToken(UUID userId, String email, HttpServletRequest request) {
     String token = randomToken();
-    jdbc.update("""
-        insert into email_verification_tokens(user_id, token_hash, expires_at)
-        values (?, ?, now() + interval '24 hours')
-        """, userId, hash(token));
-    return token;
+    OffsetDateTime expiresAt = OffsetDateTime.now().plus(properties.auth().passwordResetTtl());
+    UUID id = jdbc.queryForObject("""
+        insert into password_reset_tokens(user_id, token_hash, expires_at, ip_address, user_agent)
+        values (?, ?, ?, ?, ?)
+        returning id
+        """, UUID.class, userId, hash(token), expiresAt, ip(request), userAgent(request));
+    String link = frontendUrl("/reset-password?token=" + token);
+    enqueueAuthEmail(userId, email, "password_reset", "Đặt lại mật khẩu", "Mở link này để đặt lại mật khẩu: " + link, link);
+    return Map.of("id", id.toString(), "token", token, "link", link, "expiresAt", expiresAt.toString());
   }
 
-  private boolean exposeDevTokens() {
-    return Arrays.stream(environment.getActiveProfiles()).noneMatch(profile -> profile.equalsIgnoreCase("prod") || profile.equalsIgnoreCase("production"));
+  private Map<String, Object> createEmailVerificationToken(UUID userId, String email, HttpServletRequest request) {
+    String token = randomToken();
+    OffsetDateTime expiresAt = OffsetDateTime.now().plus(properties.auth().emailVerificationTtl());
+    UUID id = jdbc.queryForObject("""
+        insert into email_verification_tokens(user_id, token_hash, expires_at, ip_address, user_agent)
+        values (?, ?, ?, ?, ?)
+        returning id
+        """, UUID.class, userId, hash(token), expiresAt, ip(request), userAgent(request));
+    String link = frontendUrl("/verify-email?token=" + token);
+    enqueueAuthEmail(userId, email, "email_verification", "Xác minh email", "Mở link này để xác minh email: " + link, link);
+    return Map.of("id", id.toString(), "token", token, "link", link, "expiresAt", expiresAt.toString());
   }
 
-  private UUID consumeToken(String table, String rawToken) {
-    String tokenHash = hash(rawToken);
-    UUID userId = db.optional("""
-        select user_id from """ + table + """
-        where token_hash = ? and used = false and expires_at > now()
+  private Map<String, Object> validPasswordResetToken(String token) {
+    return db.optional("""
+        select id, user_id, expires_at
+        from password_reset_tokens
+        where token_hash = ? and used_at is null and expires_at > now()
         order by created_at desc
         limit 1
         for update
-        """, (rs, row) -> rs.getObject("user_id", UUID.class), tokenHash)
-        .orElseThrow(() -> new BusinessException("INVALID_TOKEN", "Token không hợp lệ hoặc đã hết hạn.", HttpStatus.UNAUTHORIZED));
-    jdbc.update("update " + table + " set used = true, used_at = now() where token_hash = ?", tokenHash);
-    return userId;
+        """, (rs, row) -> {
+          Map<String, Object> m = new LinkedHashMap<>();
+          m.put("id", rs.getObject("id", UUID.class));
+          m.put("userId", rs.getObject("user_id", UUID.class));
+          m.put("expiresAt", rs.getObject("expires_at", OffsetDateTime.class));
+          return m;
+        }, hash(token)).orElseThrow(() ->
+        new BusinessException("INVALID_RESET_TOKEN", "Token đặt lại mật khẩu không hợp lệ hoặc đã hết hạn.", HttpStatus.BAD_REQUEST));
+  }
+
+  private Map<String, Object> validEmailVerificationToken(String token) {
+    return db.optional("""
+        select id, user_id, expires_at
+        from email_verification_tokens
+        where token_hash = ? and used_at is null and expires_at > now()
+        order by created_at desc
+        limit 1
+        for update
+        """, (rs, row) -> {
+          Map<String, Object> m = new LinkedHashMap<>();
+          m.put("id", rs.getObject("id", UUID.class));
+          m.put("userId", rs.getObject("user_id", UUID.class));
+          m.put("expiresAt", rs.getObject("expires_at", OffsetDateTime.class));
+          return m;
+        }, hash(token)).orElseThrow(() ->
+        new BusinessException("INVALID_VERIFY_TOKEN", "Token xác minh email không hợp lệ hoặc đã hết hạn.", HttpStatus.BAD_REQUEST));
+  }
+
+  private void enqueueAuthEmail(UUID userId, String email, String type, String subject, String body, String actionUrl) {
+    jdbc.update("""
+        insert into auth_email_outbox(user_id, email, type, subject, body, action_url)
+        values (?, ?, ?, ?, ?, ?)
+        """, userId, email.trim().toLowerCase(), type, subject, body, actionUrl);
+  }
+
+  private void includeDevToken(Map<String, Object> payload, String prefix, Map<String, Object> token) {
+    if (!properties.auth().exposeDevTokens()) return;
+    payload.put(prefix + "Token", token.get("token"));
+    payload.put(prefix + "Link", token.get("link"));
+    payload.put(prefix + "ExpiresAt", token.get("expiresAt"));
+  }
+
+  private String frontendUrl(String path) {
+    String base = properties.auth().frontendBaseUrl();
+    if (base == null || base.isBlank()) base = "http://localhost:3000";
+    return base.replaceAll("/+$", "") + path;
   }
 
   private String randomToken() {
     byte[] bytes = new byte[32];
     secureRandom.nextBytes(bytes);
-    return HexFormat.of().formatHex(bytes);
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
   }
 
   private String hash(String token) {
@@ -226,8 +301,17 @@ public class AuthController {
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
       return HexFormat.of().formatHex(digest.digest(token.getBytes(StandardCharsets.UTF_8)));
     } catch (Exception ex) {
-      throw new IllegalStateException("Cannot hash token", ex);
+      throw new IllegalStateException("Cannot hash auth token", ex);
     }
+  }
+
+  private String firstString(Map<String, Object> body, String... keys) {
+    if (body == null) return null;
+    for (String key : keys) {
+      Object value = body.get(key);
+      if (value != null && !value.toString().isBlank()) return value.toString();
+    }
+    return null;
   }
 
   public record RegisterRequest(
@@ -241,10 +325,4 @@ public class AuthController {
   public record LoginRequest(@Email String email, @NotBlank String password) {}
 
   public record RefreshTokenRequest(@NotBlank String refreshToken) {}
-
-  public record ForgotPasswordRequest(@NotBlank @Email String email) {}
-
-  public record ResetPasswordRequest(@NotBlank String token, @JsonAlias("newPassword") @Size(min = 8, message = "Mật khẩu tối thiểu 8 ký tự") String password) {}
-
-  public record VerifyEmailRequest(@NotBlank String token) {}
 }

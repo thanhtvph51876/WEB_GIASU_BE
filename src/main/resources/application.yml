@@ -5,9 +5,9 @@ spring:
   application:
     name: tutor-platform
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/tutor_platform?options=-c%20TimeZone=Asia/Ho_Chi_Minh}
-    username: ${SPRING_DATASOURCE_USERNAME:thanhvan1509}
-    password: ${SPRING_DATASOURCE_PASSWORD:thanhvan1509}
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/tutor_platform}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
   jpa:
     open-in-view: false
     hibernate:
@@ -32,18 +32,18 @@ app:
     access-token-expire-minutes: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:60}
     refresh-token-expire-days: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS:7}
   cors:
-    allowed-origins:
-      - ${CORS_ALLOWED_ORIGINS_1:http://localhost:3000}
-      - ${CORS_ALLOWED_ORIGINS_2:http://localhost:5173}
-      - ${CORS_ALLOWED_ORIGINS_3:https://giase-web-gv6y.vercel.app}
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
   upload:
     dir: ${UPLOAD_DIR:uploads}
     public-base-url: ${UPLOAD_PUBLIC_BASE_URL:http://localhost:8080/api/v1/files}
   payment:
-    mode: ${PAYMENT_MODE:mock}
-    enabled-gateways: ${ENABLED_GATEWAYS:mock,bank_qr,vnpay,momo,payos,stripe}
-    default-gateway: ${DEFAULT_GATEWAY:mock}
+    mode: ${PAYMENT_MODE:sandbox}
+    enabled-gateways: ${ENABLED_GATEWAYS:bank_qr,vnpay,momo,payos,stripe}
+    default-gateway: ${DEFAULT_GATEWAY:bank_qr}
     timeout-minutes: ${PAYMENT_TIMEOUT_MINUTES:30}
-  seed:
-    enabled: ${SEED_DATA_ENABLED:true}
+  auth:
+    frontend-base-url: ${FRONTEND_BASE_URL:http://localhost:3000}
+    password-reset-token-expire-minutes: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:30}
+    email-verification-token-expire-minutes: ${EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES:1440}
+    expose-dev-tokens: ${AUTH_EXPOSE_DEV_TOKENS:false}
   commission-rate: ${COMMISSION_RATE:0.15}

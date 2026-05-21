@@ -1,7 +1,6 @@
 package com.example.tutorplatform.payment.gateway;
 
 public enum PaymentGatewayType {
-  MOCK,
   BANK_QR,
   VNPAY,
   MOMO,
@@ -9,7 +8,7 @@ public enum PaymentGatewayType {
   STRIPE;
 
   public static PaymentGatewayType from(String value) {
-    if (value == null || value.isBlank()) return MOCK;
+    if (value == null || value.isBlank()) return BANK_QR;
     return PaymentGatewayType.valueOf(value.trim().toUpperCase().replace("-", "_"));
   }
 

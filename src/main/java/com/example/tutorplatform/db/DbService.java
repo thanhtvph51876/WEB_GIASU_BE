@@ -226,6 +226,7 @@ public class DbService {
       m.put("note", rs.getString("note"));
       m.put("status", rs.getString("status"));
       m.put("assignedTutorId", str(rs, "assigned_tutor_id"));
+      m.put("publicVisible", hasColumn(rs, "public_visible") && rs.getBoolean("public_visible"));
       return m;
     };
   }

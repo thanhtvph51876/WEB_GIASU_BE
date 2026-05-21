@@ -10,7 +10,7 @@ public record AppProperties(
     Cors cors,
     Upload upload,
     Payment payment,
-    Seed seed,
+    Auth auth,
     double commissionRate
 ) {
   public record Jwt(String secret, long accessTokenExpireMinutes, long refreshTokenExpireDays) {
@@ -29,5 +29,18 @@ public record AppProperties(
 
   public record Payment(String mode, List<String> enabledGateways, String defaultGateway, int timeoutMinutes) {}
 
-  public record Seed(boolean enabled) {}
+  public record Auth(
+      String frontendBaseUrl,
+      long passwordResetTokenExpireMinutes,
+      long emailVerificationTokenExpireMinutes,
+      boolean exposeDevTokens
+  ) {
+    public Duration passwordResetTtl() {
+      return Duration.ofMinutes(passwordResetTokenExpireMinutes);
+    }
+
+    public Duration emailVerificationTtl() {
+      return Duration.ofMinutes(emailVerificationTokenExpireMinutes);
+    }
+  }
 }

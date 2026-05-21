@@ -47,8 +47,9 @@ public class StatusTransitionPolicy {
   );
 
   private static final Map<String, Set<String>> PAYOUT = Map.of(
-      "pending", Set.of("processing", "completed", "rejected"),
-      "processing", Set.of("completed", "rejected")
+      "pending", Set.of("processing", "approved", "paid", "completed", "rejected"),
+      "approved", Set.of("paid", "rejected"),
+      "processing", Set.of("paid", "completed", "rejected")
   );
 
   private static final Map<String, Set<String>> TUTOR = Map.of(
@@ -92,7 +93,7 @@ public class StatusTransitionPolicy {
   private void require(String entity, Map<String, Set<String>> rules, String current, String next) {
     if (current == null || next == null) return;
     if (!rules.getOrDefault(current, Set.of()).contains(next)) {
-      throw new BusinessException("BUSINESS_RULE_VIOLATION", "Không thể chuyển " + entity + " từ " + current + " sang " + next + ".");
+      throw new BusinessException("INVALID_STATUS_TRANSITION", "Không thể chuyển " + entity + " từ " + current + " sang " + next + ".");
     }
   }
 }

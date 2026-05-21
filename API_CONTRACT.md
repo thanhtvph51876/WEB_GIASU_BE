@@ -4,7 +4,6 @@ Tất cả response dùng envelope `{ success, data, message, pagination, error 
 
 | Method | Endpoint | Roles |
 |---|---|---|
-| GET | `/api/v1/health` | guest |
 | POST | `/api/v1/auth/register` | guest |
 | POST | `/api/v1/auth/login` | guest |
 | POST | `/api/v1/auth/logout` | authenticated |
@@ -15,13 +14,14 @@ Tất cả response dùng envelope `{ success, data, message, pagination, error 
 | GET/PATCH | `/api/v1/users/me/profile` | authenticated |
 | GET | `/api/v1/tutors` | guest |
 | GET | `/api/v1/tutors/{tutorId}` | guest |
+| GET/POST/DELETE | `/api/v1/favorites/tutors/*` | authenticated |
 | GET/PATCH/POST | `/api/v1/tutor/profile`, `/api/v1/tutor/profile/submit` | tutor |
 | GET/POST/DELETE | `/api/v1/tutor/documents` | tutor |
 | GET/POST/PATCH/DELETE | `/api/v1/tutor/availability` | tutor |
 | GET/POST/PATCH | `/api/v1/learning-requests` | student, parent, admin |
 | GET/POST | `/api/v1/bookings` | student, parent |
 | GET/POST | `/api/v1/tutor/bookings/*` | tutor |
-| GET | `/api/v1/classes`, `/api/v1/classes/{id}/sessions` | owner/admin |
+| GET | `/api/v1/classes`, `/api/v1/sessions`, `/api/v1/classes/{id}/sessions` | owner/admin |
 | GET/POST | `/api/v1/tutor/sessions/*` | tutor |
 | GET/POST | `/api/v1/reviews` | student, parent |
 | GET/POST | `/api/v1/conversations/*` | conversation member |
@@ -29,10 +29,9 @@ Tất cả response dùng envelope `{ success, data, message, pagination, error 
 | GET/POST | `/api/v1/payments/*` | owner/admin |
 | POST | `/api/v1/payments/{paymentId}/create-checkout` | payment owner |
 | GET | `/api/v1/payments/{paymentId}/status`, `/invoice`, `/receipt` | payment owner/admin |
-| POST | `/api/v1/payments/{paymentId}/mock-pay` | payment owner, only `paymentMode=mock` |
 | POST | `/api/v1/payments/webhooks/{gateway}` | gateway webhook, signature verified by backend |
 | GET | `/api/v1/admin/payment-transactions`, `/api/v1/admin/payment-webhook-events`, `/api/v1/admin/refunds` | admin |
-| GET/POST | `/api/v1/tutor/earnings`, `/api/v1/tutor/payouts` | tutor |
+| GET/POST | `/api/v1/tutor/payments`, `/api/v1/tutor/earnings`, `/api/v1/tutor/payouts` | tutor |
 | POST | `/api/v1/uploads` | authenticated |
 | GET | `/api/v1/files/{fileId}` | public if file visibility is `public`; owner/admin if `private` |
 | POST | `/api/v1/contact-requests` | guest |
@@ -44,11 +43,12 @@ Admin endpoints bao phủ users, tutors, tutor documents, learning requests, mat
 
 | Endpoint | Request DTO | Response DTO | Rule chính |
 |---|---|---|---|
-| `POST /api/v1/auth/register` | `RegisterRequest` | `{ accessToken, refreshToken, user }` | Password >= 8, BCrypt, tạo profile và email verification token hash |
 | `POST /api/v1/auth/login` | `{ email, password }` | `{ accessToken, refreshToken, user }` | Password BCrypt, user phải `active`, refresh token lưu hash trong DB |
 | `POST /api/v1/auth/refresh` | `{ refreshToken }` | `{ accessToken, refreshToken }` | Token phải có `type=refresh`, chưa revoked, chưa expired, user active, rotate token |
 | `POST /api/v1/auth/logout` | `{ refreshToken }` optional | `{ loggedOut: true }` | Revoke refresh token tương ứng; nếu không gửi token thì revoke refresh token của user hiện tại |
-| `POST /api/v1/auth/reset-password` | `{ token, newPassword }` | `{ reset: true }` | Token hash phải còn hạn/chưa dùng, đổi password và revoke toàn bộ refresh token |
+| `POST /api/v1/auth/forgot-password` | `{ email }` | `{ accepted: true }` | Tạo `password_reset_tokens` hash và queue email trong `auth_email_outbox` nếu email tồn tại |
+| `POST /api/v1/auth/reset-password` | `{ token, newPassword }` | `{ accepted: true }` | Token chưa dùng/chưa hết hạn, update BCrypt password và revoke refresh token cũ |
+| `POST /api/v1/auth/verify-email` | `{ token }` | `{ verified: true }` | Token chưa dùng/chưa hết hạn, set `users.email_verified = true` |
 
 Protected API chỉ nhận Bearer access token có claim `type=access`. Refresh token dùng làm Bearer token sẽ trả `401`.
 
@@ -77,20 +77,10 @@ Backend không expose storage path hoặc `/uploads/private/**`. Tutor documents
 
 - FE không gửi amount để backend tin khi tạo checkout; amount lấy từ `payments`.
 - `gateway` unknown hoặc disabled trả lỗi `UNKNOWN_PAYMENT_GATEWAY` / `PAYMENT_GATEWAY_DISABLED`.
-- `paymentMode=production` chặn mock/simulated gateway cho tới khi nối gateway thật.
+- `paymentMode=production` chặn gateway mô phỏng cho tới khi nối gateway thật.
 - Admin `mark-paid` yêu cầu `{ reason }`.
 - Payout tạo `payout_earning_items`; approve/reject chỉ tác động các earning được allocate trong payout đó.
 
-## DTO Request Chính
-
-- Learning request: `CreateLearningRequestRequest`, `UpdateLearningRequestRequest`, `AssignTutorRequest`, `UpdateLearningRequestStatusRequest`.
-- Booking: `CreateBookingRequest`, `ScheduleBookingRequest`, `RejectBookingRequest`, `CompleteTrialRequest`.
-- Class/session: `CreateClassRequest`, `UpdateClassRequest`, `CreateSessionRequest`, `CompleteSessionRequest`.
-- Review: `CreateReviewRequest`.
-- Payment: `CreateCheckoutRequest`, `AdminMarkPaymentRequest`, `RefundRequest`.
-- Payout: `CreatePayoutRequest`, `RejectPayoutRequest`.
-- Message/file: `CreateConversationRequest`, `UploadedFileResponse`.
-
 ## Error Codes chính
 
-`INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REVOKED`, `REFRESH_TOKEN_EXPIRED`, `USER_NOT_ACTIVE`, `FORBIDDEN`, `INVALID_STATUS_TRANSITION`, `FILE_ID_REQUIRED`, `INVALID_FILE_TYPE`, `MOCK_PAYMENT_DISABLED`, `MOCK_GATEWAY_FORBIDDEN`, `UNKNOWN_PAYMENT_GATEWAY`, `PAYMENT_GATEWAY_DISABLED`, `INVALID_PAYOUT_AMOUNT`.
+`INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REVOKED`, `REFRESH_TOKEN_EXPIRED`, `USER_NOT_ACTIVE`, `FORBIDDEN`, `INVALID_STATUS_TRANSITION`, `FILE_ID_REQUIRED`, `INVALID_FILE_TYPE`, `UNKNOWN_PAYMENT_GATEWAY`, `PAYMENT_GATEWAY_DISABLED`, `INVALID_PAYOUT_AMOUNT`.

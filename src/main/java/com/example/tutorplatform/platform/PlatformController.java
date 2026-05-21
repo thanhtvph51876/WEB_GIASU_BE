@@ -7,26 +7,9 @@ import com.example.tutorplatform.common.NotFoundException;
 import com.example.tutorplatform.common.PageMetadata;
 import com.example.tutorplatform.config.AppProperties;
 import com.example.tutorplatform.db.DbService;
-import com.example.tutorplatform.dto.booking.CompleteTrialRequest;
-import com.example.tutorplatform.dto.booking.CreateBookingRequest;
-import com.example.tutorplatform.dto.booking.RejectBookingRequest;
-import com.example.tutorplatform.dto.booking.ScheduleBookingRequest;
-import com.example.tutorplatform.dto.file.UploadedFileResponse;
-import com.example.tutorplatform.dto.learningrequest.AssignTutorRequest;
-import com.example.tutorplatform.dto.learningrequest.CreateLearningRequestRequest;
-import com.example.tutorplatform.dto.learningrequest.UpdateLearningRequestRequest;
-import com.example.tutorplatform.dto.learningrequest.UpdateLearningRequestStatusRequest;
-import com.example.tutorplatform.dto.message.CreateConversationRequest;
-import com.example.tutorplatform.dto.payment.AdminMarkPaymentRequest;
-import com.example.tutorplatform.dto.payment.RefundRequest;
-import com.example.tutorplatform.dto.payout.CreatePayoutRequest;
-import com.example.tutorplatform.dto.payout.RejectPayoutRequest;
-import com.example.tutorplatform.dto.review.CreateReviewRequest;
-import com.example.tutorplatform.dto.session.CompleteSessionRequest;
-import com.example.tutorplatform.dto.session.CreateSessionRequest;
-import com.example.tutorplatform.dto.tutoringclass.CreateClassRequest;
-import com.example.tutorplatform.dto.tutoringclass.UpdateClassRequest;
 import com.example.tutorplatform.auth.RefreshTokenService;
+import com.example.tutorplatform.file.FileStorageService;
+import com.example.tutorplatform.file.FileStorageService.StoredFile;
 import com.example.tutorplatform.payment.PaymentService;
 import com.example.tutorplatform.policy.StatusTransitionPolicy;
 import jakarta.validation.Valid;
@@ -41,7 +24,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -66,15 +48,17 @@ public class PlatformController {
   private final PaymentService paymentService;
   private final RefreshTokenService refreshTokenService;
   private final StatusTransitionPolicy statusPolicy;
+  private final FileStorageService fileStorage;
 
   public PlatformController(DbService db, AppProperties properties, PaymentService paymentService, RefreshTokenService refreshTokenService,
-                            StatusTransitionPolicy statusPolicy) {
+                            StatusTransitionPolicy statusPolicy, FileStorageService fileStorage) {
     this.db = db;
     this.jdbc = db.jdbc();
     this.properties = properties;
     this.paymentService = paymentService;
     this.refreshTokenService = refreshTokenService;
     this.statusPolicy = statusPolicy;
+    this.fileStorage = fileStorage;
   }
 
   @GetMapping("/catalog/subjects")
@@ -103,6 +87,25 @@ public class PlatformController {
     )));
   }
 
+  @GetMapping("/public/stats")
+  public ApiResponse<Map<String, Object>> publicStats() {
+    long totalTutors = jdbc.queryForObject("select count(*) from tutor_profiles where status = 'approved'", Long.class);
+    long totalStudents = jdbc.queryForObject("select count(*) from users where role in ('student','parent')", Long.class);
+    long completedSessions = jdbc.queryForObject("select count(*) from class_sessions where status = 'completed'", Long.class);
+    long reviewCount = jdbc.queryForObject("select count(*) from reviews where status = 'visible'", Long.class);
+    long positiveReviews = jdbc.queryForObject("select count(*) from reviews where status = 'visible' and rating >= 4", Long.class);
+    Double averageRating = jdbc.queryForObject("select coalesce(avg(rating), 0) from reviews where status = 'visible'", Double.class);
+    int satisfactionRate = reviewCount == 0 ? 0 : (int) Math.round(positiveReviews * 100.0 / reviewCount);
+    return ApiResponse.ok(Map.of(
+        "totalTutors", totalTutors,
+        "totalStudents", totalStudents,
+        "completedSessions", completedSessions,
+        "satisfactionRate", satisfactionRate,
+        "verifiedTutors", totalTutors,
+        "averageRating", averageRating == null ? 0 : Math.round(averageRating * 10.0) / 10.0
+    ));
+  }
+
   @GetMapping("/users/me")
   public ApiResponse<Map<String, Object>> me() {
     return ApiResponse.ok(db.currentUserOrThrow());
@@ -128,8 +131,8 @@ public class PlatformController {
     UUID userId = uuid(user.get("id"));
     return switch (user.get("role").toString()) {
       case "tutor" -> ApiResponse.ok(db.tutorById(db.tutorIdByUserOrThrow(userId), true));
-      case "parent" -> ApiResponse.ok(profile("parent_profiles", userId));
-      default -> ApiResponse.ok(profile("student_profiles", userId));
+      case "parent" -> ApiResponse.ok(parentProfileByUser(userId));
+      default -> ApiResponse.ok(studentProfileByUser(userId));
     };
   }
 
@@ -149,7 +152,7 @@ public class PlatformController {
           where user_id = ?
           """, string(body, "relationship"), string(body, "studentName"), firstString(body, "studentGrade", "grade"),
           string(body, "address"), string(body, "province"), string(body, "district"), userId);
-      return ApiResponse.ok(profile("parent_profiles", userId));
+      return ApiResponse.ok(parentProfileByUser(userId));
     }
     jdbc.update("""
         update student_profiles set grade_level = coalesce(?, grade_level),
@@ -161,12 +164,22 @@ public class PlatformController {
         """, firstString(body, "grade", "gradeLevel"), string(body, "school"), string(body, "learningGoals"),
         firstString(body, "teachingMode", "preferredLearningMode"), string(body, "address"),
         string(body, "province"), string(body, "district"), userId);
-    return ApiResponse.ok(profile("student_profiles", userId));
+    return ApiResponse.ok(studentProfileByUser(userId));
   }
 
   @GetMapping("/admin/users")
   public ApiResponse<List<Map<String, Object>>> adminUsers() {
     return ApiResponse.ok(jdbc.query("select * from users order by created_at desc", db.userMapper()));
+  }
+
+  @GetMapping("/admin/student-profiles")
+  public ApiResponse<List<Map<String, Object>>> adminStudentProfiles() {
+    return ApiResponse.ok(jdbc.query("select * from student_profiles order by created_at desc", studentProfileMapper()));
+  }
+
+  @GetMapping("/admin/parent-profiles")
+  public ApiResponse<List<Map<String, Object>>> adminParentProfiles() {
+    return ApiResponse.ok(jdbc.query("select * from parent_profiles order by created_at desc", parentProfileMapper()));
   }
 
   @GetMapping("/admin/users/{userId}")
@@ -266,6 +279,44 @@ public class PlatformController {
   @GetMapping("/tutors/{tutorId}")
   public ApiResponse<Map<String, Object>> tutor(@PathVariable UUID tutorId) {
     return ApiResponse.ok(db.tutorById(tutorId, db.isAdmin()));
+  }
+
+  @GetMapping("/favorites/tutors")
+  public ApiResponse<List<Map<String, Object>>> favoriteTutors() {
+    UUID userId = db.currentUserIdOrThrow();
+    return ApiResponse.ok(jdbc.query("""
+        select tp.*, u.full_name, u.avatar_url
+        from tutor_favorites tf
+        join tutor_profiles tp on tp.id = tf.tutor_id
+        join users u on u.id = tp.user_id
+        where tf.user_id = ? and tp.status = 'approved'
+        order by tf.created_at desc
+        """, db.tutorMapper(), userId));
+  }
+
+  @GetMapping("/favorites/tutors/ids")
+  public ApiResponse<Map<String, Object>> favoriteTutorIds() {
+    UUID userId = db.currentUserIdOrThrow();
+    return ApiResponse.ok(Map.of("ids", favoriteTutorIdsForUser(userId)));
+  }
+
+  @PostMapping("/favorites/tutors/{tutorId}")
+  public ApiResponse<Map<String, Object>> addFavoriteTutor(@PathVariable UUID tutorId) {
+    UUID userId = db.currentUserIdOrThrow();
+    db.tutorById(tutorId, false);
+    jdbc.update("""
+        insert into tutor_favorites(user_id, tutor_id)
+        values (?, ?)
+        on conflict (user_id, tutor_id) do nothing
+        """, userId, tutorId);
+    return ApiResponse.ok(Map.of("isFavorite", true, "ids", favoriteTutorIdsForUser(userId)), "Đã lưu gia sư yêu thích.");
+  }
+
+  @DeleteMapping("/favorites/tutors/{tutorId}")
+  public ApiResponse<Map<String, Object>> removeFavoriteTutor(@PathVariable UUID tutorId) {
+    UUID userId = db.currentUserIdOrThrow();
+    jdbc.update("delete from tutor_favorites where user_id = ? and tutor_id = ?", userId, tutorId);
+    return ApiResponse.ok(Map.of("isFavorite", false, "ids", favoriteTutorIdsForUser(userId)), "Đã bỏ lưu gia sư yêu thích.");
   }
 
   @GetMapping("/tutor/profile")
@@ -450,11 +501,104 @@ public class PlatformController {
     return ApiResponse.ok(db.learningRequests(" where lr.requester_id = ?", userId));
   }
 
+  @GetMapping("/public/learning-requests")
+  public ApiResponse<List<Map<String, Object>>> publicLearningRequests() {
+    return ApiResponse.ok(jdbc.query("""
+        select lr.id, lr.request_code, lr.student_grade, s.name subject_name, gl.name grade_name,
+          lr.learning_mode, lr.province, lr.district, lr.budget_min, lr.budget_max,
+          lr.preferred_schedule, lr.status, lr.created_at
+        from learning_requests lr
+        join subjects s on s.id = lr.subject_id
+        left join grade_levels gl on gl.id = lr.grade_level_id
+        where lr.public_visible = true
+          and lr.status in ('new','consulting','matched','trial_scheduled')
+        order by lr.created_at desc
+        limit 100
+        """, (rs, row) -> {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", rs.getObject("id").toString());
+      m.put("requestCode", rs.getString("request_code"));
+      m.put("subject", rs.getString("subject_name"));
+      m.put("grade", valueOr(rs.getString("student_grade"), rs.getString("grade_name")));
+      m.put("teachingMode", rs.getString("learning_mode"));
+      m.put("learningMode", rs.getString("learning_mode"));
+      m.put("province", rs.getString("province"));
+      m.put("district", rs.getString("district"));
+      m.put("location", locationSummary(rs.getString("province"), rs.getString("district")));
+      m.put("budgetMin", nullableInt(rs, "budget_min"));
+      m.put("budgetMax", nullableInt(rs, "budget_max"));
+      m.put("expectedFee", nullableInt(rs, "budget_max"));
+      m.put("preferredSchedule", rs.getString("preferred_schedule"));
+      m.put("status", rs.getString("status"));
+      m.put("createdAt", rs.getObject("created_at", OffsetDateTime.class).toString());
+      return m;
+    }));
+  }
+
+  @PostMapping("/public/learning-requests")
+  @Transactional
+  public ApiResponse<Map<String, Object>> createPublicLearningRequest(@RequestBody Map<String, Object> body) {
+    validatePublicLearningRequest(body);
+    Map<String, Object> request = createLearningRequestInternal(body, null);
+    return ApiResponse.ok(publicLearningRequestResponse(request), "Yêu cầu đã được gửi. Admin sẽ kiểm tra trước khi xử lý.");
+  }
+
+  @GetMapping("/student/learning-requests/me")
+  public ApiResponse<List<Map<String, Object>>> myStudentLearningRequests() {
+    requireStudentOrParent();
+    return ApiResponse.ok(db.learningRequests(" where lr.requester_id = ?", db.currentUserIdOrThrow()));
+  }
+
+  @PostMapping("/student/learning-requests")
+  @Transactional
+  public ApiResponse<Map<String, Object>> createStudentLearningRequest(@RequestBody Map<String, Object> body) {
+    requireStudentOrParent();
+    return ApiResponse.ok(createLearningRequestInternal(body, db.currentUserIdOrThrow()), "Yêu cầu đã được tạo");
+  }
+
   @PostMapping("/learning-requests")
   @Transactional
-  public ApiResponse<Map<String, Object>> createLearningRequest(@Valid @RequestBody CreateLearningRequestRequest request) {
-    Map<String, Object> body = request.toMap();
-    UUID userId = db.currentUserIdOrThrow();
+  public ApiResponse<Map<String, Object>> createLearningRequest(@RequestBody Map<String, Object> body) {
+    return ApiResponse.ok(createLearningRequestInternal(body, db.currentUserIdOrThrow()), "Yêu cầu đã được tạo");
+  }
+
+  private void validatePublicLearningRequest(Map<String, Object> body) {
+    String studentName = firstString(body, "studentName");
+    String parentName = firstString(body, "parentName");
+    if (studentName == null && parentName == null) {
+      throw new BusinessException("CONTACT_NAME_REQUIRED", "Vui lòng nhập tên học sinh hoặc phụ huynh.");
+    }
+    String phone = firstString(body, "phone");
+    String email = firstString(body, "email");
+    if (phone == null && email == null) {
+      throw new BusinessException("CONTACT_REQUIRED", "Vui lòng nhập số điện thoại hoặc email.");
+    }
+    Object subject = firstPresent(body, "subjectId", "subject");
+    if (subject == null || subject.toString().isBlank()) {
+      throw new BusinessException("SUBJECT_REQUIRED", "Vui lòng chọn môn học.");
+    }
+    if (firstString(body, "grade") == null) {
+      throw new BusinessException("GRADE_REQUIRED", "Vui lòng nhập lớp hiện tại.");
+    }
+    if (phone != null && !phone.matches("^[0-9+() .-]{8,20}$")) {
+      throw new BusinessException("INVALID_PHONE", "Số điện thoại không hợp lệ.");
+    }
+    if (email != null && !email.matches("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")) {
+      throw new BusinessException("INVALID_EMAIL", "Email không hợp lệ.");
+    }
+    for (String key : List.of("studentName", "parentName", "phone", "email", "grade", "province", "district", "preferredSchedule")) {
+      String value = firstString(body, key);
+      if (value != null && value.length() > 255) {
+        throw new BusinessException("FIELD_TOO_LONG", "Trường " + key + " vượt quá độ dài cho phép.");
+      }
+    }
+    String note = firstString(body, "note", "learningGoal");
+    if (note != null && note.length() > 2000) {
+      throw new BusinessException("FIELD_TOO_LONG", "Ghi chú vượt quá độ dài cho phép.");
+    }
+  }
+
+  private Map<String, Object> createLearningRequestInternal(Map<String, Object> body, UUID userId) {
     UUID subjectId = db.requiredSubjectId(firstPresent(body, "subjectId", "subject"));
     UUID gradeId = db.gradeLevelId(firstPresent(body, "gradeLevelId", "grade"));
     String code = "REQ-" + java.time.Year.now() + "-" + String.format("%03d",
@@ -462,18 +606,22 @@ public class PlatformController {
     UUID id = jdbc.queryForObject("""
         insert into learning_requests(request_code, requester_id, student_name, parent_name, phone, email, student_grade,
           subject_id, grade_level_id, goal, learning_mode, province, district, budget_min, budget_max,
-          preferred_schedule, learning_goal, note, status)
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new') returning id
+          preferred_schedule, learning_goal, note, status, public_visible)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?) returning id
         """, UUID.class, code, userId, firstString(body, "studentName"), firstString(body, "parentName"),
         firstString(body, "phone"), firstString(body, "email"), firstString(body, "grade"),
         subjectId, gradeId, valueOr(firstString(body, "goal"), "improve_grades"),
         valueOr(firstString(body, "teachingMode", "learningMode"), "both"), firstString(body, "province", "location"),
         firstString(body, "district"), firstInteger(body, "budgetMin", "expectedFee"),
         firstInteger(body, "budgetMax", "expectedFee"), firstString(body, "preferredSchedule"),
-        firstString(body, "learningGoal"), firstString(body, "note"));
+        firstString(body, "learningGoal"), firstString(body, "note"), userId != null);
     db.notifyAdmins("info", "Yêu cầu học mới", "Có yêu cầu tìm gia sư mới cần xử lý.", "/admin/learning-requests", "learningRequest", id);
-    db.auditCurrent("student.create_learning_request", "learningRequest", id, "Tạo yêu cầu tìm gia sư mới.");
-    return ApiResponse.ok(db.learningRequestById(id), "Yêu cầu đã được tạo");
+    if (userId == null) {
+      db.audit(null, "guest", "public.create_learning_request", "learningRequest", id, "Khách gửi nhu cầu học qua form công khai.");
+    } else {
+      db.auditCurrent("student.create_learning_request", "learningRequest", id, "Tạo yêu cầu tìm gia sư mới.");
+    }
+    return db.learningRequestById(id);
   }
 
   @GetMapping("/learning-requests/{requestId}")
@@ -491,8 +639,7 @@ public class PlatformController {
   }
 
   @PatchMapping("/learning-requests/{requestId}")
-  public ApiResponse<Map<String, Object>> updateLearningRequest(@PathVariable UUID requestId, @Valid @RequestBody UpdateLearningRequestRequest requestBody) {
-    Map<String, Object> body = requestBody.toMap();
+  public ApiResponse<Map<String, Object>> updateLearningRequest(@PathVariable UUID requestId, @RequestBody Map<String, Object> body) {
     Map<String, Object> request = db.learningRequestById(requestId);
     if (!db.isAdmin()) db.requireUserOwned(uuidOrNull(request.get("userId")));
     jdbc.update("""
@@ -526,11 +673,8 @@ public class PlatformController {
   }
 
   @PatchMapping("/admin/learning-requests/{requestId}/status")
-  public ApiResponse<Map<String, Object>> updateLearningRequestStatus(@PathVariable UUID requestId, @Valid @RequestBody UpdateLearningRequestStatusRequest body) {
-    return updateLearningRequestStatusInternal(requestId, body.status());
-  }
-
-  private ApiResponse<Map<String, Object>> updateLearningRequestStatusInternal(UUID requestId, String status) {
+  public ApiResponse<Map<String, Object>> updateLearningRequestStatus(@PathVariable UUID requestId, @RequestBody Map<String, Object> body) {
+    String status = firstString(body, "status");
     if (!List.of("new", "consulting", "matched", "trial_scheduled", "trial_completed", "active", "rematch", "cancelled", "completed").contains(status)) {
       throw new BusinessException("INVALID_STATUS", "Trạng thái yêu cầu không hợp lệ.");
     }
@@ -543,17 +687,8 @@ public class PlatformController {
 
   @PostMapping("/admin/learning-requests/{requestId}/assign-tutor")
   @Transactional
-  public ApiResponse<Map<String, Object>> assignTutor(@PathVariable UUID requestId, @Valid @RequestBody AssignTutorRequest requestBody) {
-    Map<String, Object> body = requestBody.toMap();
+  public ApiResponse<Map<String, Object>> assignTutor(@PathVariable UUID requestId, @RequestBody Map<String, Object> body) {
     UUID tutorId = uuid(firstPresent(body, "tutorId", "assignedTutorId"));
-    Map<String, Object> requestBefore = db.learningRequestById(requestId);
-    String requestStatus = requestBefore.get("status").toString();
-    if (List.of("cancelled", "completed", "active").contains(requestStatus)) {
-      throw new BusinessException("LEARNING_REQUEST_NOT_ASSIGNABLE", "Yêu cầu học không còn có thể gán gia sư.");
-    }
-    if (!"matched".equals(requestStatus)) {
-      statusPolicy.requireLearningRequest(requestStatus, "matched");
-    }
     String tutorStatus = jdbc.queryForObject("select status from tutor_profiles where id = ?", String.class, tutorId);
     if (!"approved".equals(tutorStatus)) throw new BusinessException("TUTOR_NOT_APPROVED", "Chỉ có thể gán gia sư đã được duyệt.");
     jdbc.update("""
@@ -561,13 +696,94 @@ public class PlatformController {
         where id = ?
         """, tutorId, db.currentUserIdOrThrow(), requestId);
     UUID tutorUserId = jdbc.queryForObject("select user_id from tutor_profiles where id = ?", UUID.class, tutorId);
+    db.notify(tutorUserId, "info", "Yêu cầu dạy học mới", "Bạn được gán cho một yêu cầu tìm gia sư.", "/dashboard/tutor/requests", "learningRequest", requestId);
     Map<String, Object> request = db.learningRequestById(requestId);
-    Map<String, Object> booking = bookingForAssignedRequest(requestId, request, tutorId, body);
-    db.notify(tutorUserId, "info", "Booking học thử mới", "Bạn được gán một yêu cầu học mới. Vui lòng xác nhận booking học thử.", "/dashboard/tutor/requests", "booking", uuid(booking.get("id")));
     UUID requesterId = uuidOrNull(request.get("userId"));
-    if (requesterId != null) db.notify(requesterId, "success", "Đã có gia sư phù hợp", "Hệ thống đã tìm được gia sư phù hợp cho yêu cầu của bạn.", "/dashboard/requests", "learningRequest", requestId);
+    if (requesterId != null) db.notify(requesterId, "success", "Đã có gia sư phù hợp", "Admin đã gán gia sư cho yêu cầu của bạn.", "/dashboard/requests", "learningRequest", requestId);
     db.auditCurrent("admin.assign_tutor", "learningRequest", requestId, "Admin gán gia sư cho yêu cầu học.");
-    return ApiResponse.ok(Map.of("learningRequest", request, "booking", booking), "Đã gán gia sư và tạo booking học thử");
+    return ApiResponse.ok(request);
+  }
+
+  @PostMapping("/admin/learning-requests/{requestId}/assign-tutor-with-booking")
+  @Transactional
+  public ApiResponse<Map<String, Object>> assignTutorWithBooking(@PathVariable UUID requestId, @RequestBody Map<String, Object> body) {
+    UUID tutorId = uuid(firstPresent(body, "tutorId", "assignedTutorId"));
+    String tutorStatus = jdbc.queryForObject("select status from tutor_profiles where id = ?", String.class, tutorId);
+    if (!"approved".equals(tutorStatus)) throw new BusinessException("TUTOR_NOT_APPROVED", "Chỉ có thể gán gia sư đã được duyệt.");
+
+    Map<String, Object> request = db.learningRequestById(requestId);
+    if (!"matched".equals(request.get("status").toString())) {
+      statusPolicy.requireLearningRequest(request.get("status").toString(), "matched");
+    }
+    boolean createBooking = !Boolean.FALSE.equals(bool(body, "createBooking"));
+    OffsetDateTime trialStart = optionalDateTime(body, "trialStartTime", "scheduledStart", "startTime");
+    OffsetDateTime trialEnd = optionalDateTime(body, "trialEndTime", "scheduledEnd", "endTime");
+    if ((trialStart == null) != (trialEnd == null)) {
+      throw new BusinessException("INVALID_TRIAL_TIME", "Cần nhập đủ thời gian bắt đầu và kết thúc học thử.");
+    }
+    if (trialStart != null && !trialEnd.isAfter(trialStart)) {
+      throw new BusinessException("INVALID_TRIAL_TIME", "Thời gian kết thúc học thử phải sau thời gian bắt đầu.");
+    }
+    UUID studentId = uuidOrNull(request.get("userId"));
+    UUID subjectId = uuid(request.get("subjectId"));
+    UUID gradeId = uuidOrNull(request.get("gradeLevelId"));
+    UUID bookingId = null;
+    if (createBooking) {
+      bookingId = db.optional("""
+          select id from trial_bookings
+          where learning_request_id = ? and tutor_id = ? and status <> 'cancelled'
+          order by created_at desc
+          limit 1
+          """, (rs, row) -> rs.getObject("id", UUID.class), requestId, tutorId).orElse(null);
+      if (bookingId != null) {
+        jdbc.update("""
+            update trial_bookings
+            set scheduled_start = coalesce(?, scheduled_start),
+                scheduled_end = coalesce(?, scheduled_end),
+                tutor_response_note = coalesce(?, tutor_response_note),
+                status = coalesce(?, status),
+                updated_at = now()
+            where id = ?
+            """, trialStart, trialEnd, firstString(body, "note"), trialStart == null ? null : "scheduled", bookingId);
+        db.auditCurrent("admin.assign_tutor_with_booking_idempotent", "learningRequest", requestId, "Bỏ qua tạo booking trùng khi gán gia sư.");
+      } else {
+        bookingId = jdbc.queryForObject("""
+            insert into trial_bookings(learning_request_id, student_id, tutor_id, subject_id, grade_level_id,
+              student_name, parent_name, phone, email, preferred_time, learning_mode, scheduled_start,
+              scheduled_end, goal, tutor_response_note, status)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            returning id
+            """, UUID.class, requestId, studentId, tutorId, subjectId, gradeId,
+            string(request, "studentName"), string(request, "parentName"), string(request, "phone"),
+            string(request, "email"), valueOr(firstString(body, "preferredTime"), string(request, "preferredSchedule")),
+            normalizeOnlineOffline(valueOr(string(request, "learningMode"), "online")), trialStart, trialEnd,
+            valueOr(string(request, "learningGoal"), string(request, "note")), firstString(body, "note"),
+            trialStart == null ? "assigned" : "scheduled");
+      }
+    }
+
+    jdbc.update("""
+        update learning_requests set assigned_tutor_id = ?, assigned_by = ?, assigned_at = now(), status = 'matched', updated_at = now()
+        where id = ?
+        """, tutorId, db.currentUserIdOrThrow(), requestId);
+    UUID tutorUserId = jdbc.queryForObject("select user_id from tutor_profiles where id = ?", UUID.class, tutorId);
+    db.notify(tutorUserId, "info", createBooking ? "Booking học thử mới" : "Yêu cầu dạy học mới",
+        createBooking ? "Bạn được gán một booking học thử từ yêu cầu học." : "Bạn được gán cho một yêu cầu tìm gia sư.",
+        "/dashboard/tutor/requests", createBooking ? "booking" : "learningRequest", createBooking ? bookingId : requestId);
+    if (studentId != null) {
+      db.notify(studentId, "success", "Đã có gia sư phù hợp",
+          createBooking ? "Admin đã gán gia sư và tạo booking học thử." : "Admin đã gán gia sư cho yêu cầu của bạn.",
+          createBooking ? "/dashboard/bookings" : "/dashboard/requests",
+          createBooking ? "booking" : "learningRequest",
+          createBooking ? bookingId : requestId);
+    }
+    db.auditCurrent("admin.assign_tutor_with_booking", "learningRequest", requestId, createBooking
+        ? "Admin gán gia sư và tạo booking trong cùng giao dịch."
+        : "Admin gán gia sư không tạo booking theo request.");
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("learningRequest", db.learningRequestById(requestId));
+    data.put("booking", bookingId == null ? null : db.bookingById(bookingId));
+    return ApiResponse.ok(data);
   }
 
   @GetMapping("/admin/learning-requests/{requestId}/matching-tutors")
@@ -612,7 +828,7 @@ public class PlatformController {
 
   @PostMapping("/admin/learning-requests/{requestId}/cancel")
   public ApiResponse<Map<String, Object>> adminCancelRequest(@PathVariable UUID requestId) {
-    return updateLearningRequestStatusInternal(requestId, "cancelled");
+    return updateLearningRequestStatus(requestId, Map.of("status", "cancelled"));
   }
 
   @GetMapping("/bookings")
@@ -623,8 +839,7 @@ public class PlatformController {
 
   @PostMapping("/bookings")
   @Transactional
-  public ApiResponse<Map<String, Object>> createBooking(@Valid @RequestBody CreateBookingRequest request) {
-    Map<String, Object> body = request.toMap();
+  public ApiResponse<Map<String, Object>> createBooking(@RequestBody Map<String, Object> body) {
     UUID studentId = db.currentUserIdOrThrow();
     UUID tutorId = uuid(firstPresent(body, "tutorId"));
     String tutorStatus = jdbc.queryForObject("select status from tutor_profiles where id = ?", String.class, tutorId);
@@ -673,8 +888,7 @@ public class PlatformController {
   }
 
   @PostMapping("/tutor/bookings/{bookingId}/accept")
-  public ApiResponse<Map<String, Object>> acceptBooking(@PathVariable UUID bookingId, @Valid @RequestBody(required = false) ScheduleBookingRequest requestBody) {
-    Map<String, Object> body = requestBody == null ? Map.of() : requestBody.toMap();
+  public ApiResponse<Map<String, Object>> acceptBooking(@PathVariable UUID bookingId, @RequestBody(required = false) Map<String, Object> body) {
     UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
     String status = jdbc.queryForObject("select status from tutor_profiles where id = ?", String.class, tutorId);
     if (!"approved".equals(status)) throw new BusinessException("TUTOR_NOT_APPROVED", "Gia sư phải được duyệt mới được nhận booking.");
@@ -682,7 +896,7 @@ public class PlatformController {
     if (!tutorId.equals(uuid(booking.get("tutorId")))) throw new ForbiddenException("Bạn không có quyền nhận booking này.");
     statusPolicy.requireBooking(booking.get("status").toString(), "accepted");
     jdbc.update("update trial_bookings set status = 'accepted', updated_at = now() where id = ? and tutor_id = ?", bookingId, tutorId);
-    if (body.containsKey("date") || body.containsKey("schedule") || body.containsKey("scheduledStart")) {
+    if (body != null && (body.containsKey("date") || body.containsKey("schedule") || body.containsKey("scheduledStart"))) {
       scheduleBookingInternal(bookingId, body);
     }
     notifyBookingParties(bookingId, "success", "Gia sư đã chấp nhận booking", "Booking học thử đã được gia sư chấp nhận.");
@@ -691,8 +905,7 @@ public class PlatformController {
   }
 
   @PostMapping("/tutor/bookings/{bookingId}/reject")
-  public ApiResponse<Map<String, Object>> rejectBooking(@PathVariable UUID bookingId, @Valid @RequestBody RejectBookingRequest requestBody) {
-    Map<String, Object> body = requestBody.toMap();
+  public ApiResponse<Map<String, Object>> rejectBooking(@PathVariable UUID bookingId, @RequestBody Map<String, Object> body) {
     UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
     Map<String, Object> booking = db.bookingById(bookingId);
     if (!tutorId.equals(uuid(booking.get("tutorId")))) throw new ForbiddenException("Bạn không có quyền từ chối booking này.");
@@ -716,8 +929,7 @@ public class PlatformController {
   }
 
   @PostMapping("/admin/bookings/{bookingId}/assign-tutor")
-  public ApiResponse<Map<String, Object>> adminAssignBookingTutor(@PathVariable UUID bookingId, @Valid @RequestBody AssignTutorRequest requestBody) {
-    Map<String, Object> body = requestBody.toMap();
+  public ApiResponse<Map<String, Object>> adminAssignBookingTutor(@PathVariable UUID bookingId, @RequestBody Map<String, Object> body) {
     UUID tutorId = uuid(firstPresent(body, "tutorId"));
     Map<String, Object> booking = db.bookingById(bookingId);
     statusPolicy.requireBooking(booking.get("status").toString(), "assigned");
@@ -729,20 +941,18 @@ public class PlatformController {
   }
 
   @PostMapping("/admin/bookings/{bookingId}/schedule")
-  public ApiResponse<Map<String, Object>> scheduleBooking(@PathVariable UUID bookingId, @Valid @RequestBody ScheduleBookingRequest requestBody) {
-    Map<String, Object> body = requestBody.toMap();
+  public ApiResponse<Map<String, Object>> scheduleBooking(@PathVariable UUID bookingId, @RequestBody Map<String, Object> body) {
     scheduleBookingInternal(bookingId, body);
     db.auditCurrent("admin.schedule_booking", "booking", bookingId, "Admin xếp lịch học thử.");
     return ApiResponse.ok(db.bookingById(bookingId));
   }
 
   @PostMapping("/admin/bookings/{bookingId}/complete")
-  public ApiResponse<Map<String, Object>> completeBooking(@PathVariable UUID bookingId, @Valid @RequestBody(required = false) CompleteTrialRequest requestBody) {
-    Map<String, Object> body = requestBody == null ? Map.of() : requestBody.toMap();
+  public ApiResponse<Map<String, Object>> completeBooking(@PathVariable UUID bookingId, @RequestBody(required = false) Map<String, Object> body) {
     Map<String, Object> booking = db.bookingById(bookingId);
     statusPolicy.requireBooking(booking.get("status").toString(), "completed");
     jdbc.update("update trial_bookings set status = 'completed', result_note = coalesce(?, result_note), updated_at = now() where id = ?",
-        firstString(body, "resultNote", "note"), bookingId);
+        body == null ? null : firstString(body, "resultNote", "note"), bookingId);
     UUID requestId = jdbc.queryForObject("select learning_request_id from trial_bookings where id = ?", UUID.class, bookingId);
     if (requestId != null) jdbc.update("update learning_requests set status = 'trial_completed', updated_at = now() where id = ?", requestId);
     db.notifyAdmins("info", "Học thử đã hoàn tất", "Một booking học thử đã hoàn tất.", "/admin/bookings", "booking", bookingId);
@@ -846,6 +1056,14 @@ public class PlatformController {
     return ApiResponse.ok(db.sessions(" where cs.tutor_id = ?", db.tutorIdByUserOrThrow(db.currentUserIdOrThrow())));
   }
 
+  @GetMapping("/sessions")
+  public ApiResponse<List<Map<String, Object>>> sessions() {
+    UUID userId = db.currentUserIdOrThrow();
+    if (db.isAdmin()) return ApiResponse.ok(db.sessions(""));
+    if (db.isTutor()) return ApiResponse.ok(db.sessions(" where cs.tutor_id = ?", db.tutorIdByUserOrThrow(userId)));
+    return ApiResponse.ok(db.sessions(" where cs.student_id = ?", userId));
+  }
+
   @GetMapping("/sessions/{sessionId}")
   public ApiResponse<Map<String, Object>> session(@PathVariable UUID sessionId) {
     Map<String, Object> session = db.sessionById(sessionId);
@@ -855,12 +1073,11 @@ public class PlatformController {
   }
 
   @PostMapping("/tutor/sessions/{sessionId}/complete")
-  public ApiResponse<Map<String, Object>> tutorCompleteSession(@PathVariable UUID sessionId, @Valid @RequestBody(required = false) CompleteSessionRequest requestBody) {
-    Map<String, Object> body = requestBody == null ? Map.of() : requestBody.toMap();
+  public ApiResponse<Map<String, Object>> tutorCompleteSession(@PathVariable UUID sessionId, @RequestBody(required = false) Map<String, Object> body) {
     UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
     UUID sessionTutor = jdbc.queryForObject("select tutor_id from class_sessions where id = ?", UUID.class, sessionId);
     if (!tutorId.equals(sessionTutor)) throw new ForbiddenException("Bạn không có quyền hoàn tất buổi học này.");
-    completeSessionInternal(sessionId, firstString(body, "note", "tutorNote"));
+    completeSessionInternal(sessionId, body == null ? null : firstString(body, "note", "tutorNote"));
     return ApiResponse.ok(db.sessionById(sessionId));
   }
 
@@ -887,8 +1104,7 @@ public class PlatformController {
   }
 
   @PostMapping("/admin/classes")
-  public ApiResponse<Map<String, Object>> createClass(@Valid @RequestBody CreateClassRequest requestBody) {
-    Map<String, Object> body = requestBody.toMap();
+  public ApiResponse<Map<String, Object>> createClass(@RequestBody Map<String, Object> body) {
     UUID studentId = uuid(firstPresent(body, "studentId"));
     UUID tutorId = uuid(firstPresent(body, "tutorId"));
     UUID subjectId = db.requiredSubjectId(firstPresent(body, "subjectId", "subject"));
@@ -912,8 +1128,7 @@ public class PlatformController {
   }
 
   @PatchMapping("/admin/classes/{classId}")
-  public ApiResponse<Map<String, Object>> updateClass(@PathVariable UUID classId, @Valid @RequestBody UpdateClassRequest requestBody) {
-    Map<String, Object> body = requestBody.toMap();
+  public ApiResponse<Map<String, Object>> updateClass(@PathVariable UUID classId, @RequestBody Map<String, Object> body) {
     String nextStatus = firstString(body, "status");
     if (nextStatus != null) {
       Map<String, Object> c = db.classById(classId);
@@ -958,8 +1173,7 @@ public class PlatformController {
   }
 
   @PostMapping("/admin/classes/{classId}/sessions")
-  public ApiResponse<Map<String, Object>> createSession(@PathVariable UUID classId, @Valid @RequestBody CreateSessionRequest requestBody) {
-    Map<String, Object> body = requestBody.toMap();
+  public ApiResponse<Map<String, Object>> createSession(@PathVariable UUID classId, @RequestBody Map<String, Object> body) {
     Map<String, Object> c = db.classById(classId);
     UUID id = jdbc.queryForObject("""
         insert into class_sessions(class_id, student_id, tutor_id, scheduled_start, scheduled_end, status)
@@ -989,9 +1203,8 @@ public class PlatformController {
   }
 
   @PostMapping("/admin/sessions/{sessionId}/complete")
-  public ApiResponse<Map<String, Object>> adminCompleteSession(@PathVariable UUID sessionId, @Valid @RequestBody(required = false) CompleteSessionRequest requestBody) {
-    Map<String, Object> body = requestBody == null ? Map.of() : requestBody.toMap();
-    completeSessionInternal(sessionId, firstString(body, "note", "tutorNote"));
+  public ApiResponse<Map<String, Object>> adminCompleteSession(@PathVariable UUID sessionId, @RequestBody(required = false) Map<String, Object> body) {
+    completeSessionInternal(sessionId, body == null ? null : firstString(body, "note", "tutorNote"));
     return ApiResponse.ok(db.sessionById(sessionId));
   }
 
@@ -1029,8 +1242,7 @@ public class PlatformController {
 
   @PostMapping("/reviews")
   @Transactional
-  public ApiResponse<Map<String, Object>> createReview(@Valid @RequestBody CreateReviewRequest requestBody) {
-    Map<String, Object> body = requestBody.toMap();
+  public ApiResponse<Map<String, Object>> createReview(@RequestBody Map<String, Object> body) {
     UUID reviewerId = db.currentUserIdOrThrow();
     UUID sessionId = uuid(firstPresent(body, "sessionId"));
     Map<String, Object> session = db.sessionById(sessionId);
@@ -1099,52 +1311,14 @@ public class PlatformController {
 
   @PostMapping("/conversations")
   @Transactional
-  public ApiResponse<Map<String, Object>> createConversation(@Valid @RequestBody CreateConversationRequest body) {
+  public ApiResponse<Map<String, Object>> createConversation(@RequestBody Map<String, Object> body) {
     UUID userId = db.currentUserIdOrThrow();
-    UUID bookingId = body.bookingId();
-    UUID classId = body.classId();
-    String type = valueOr(body.type(), bookingId != null ? "booking" : classId != null ? "class" : "support");
-    if (!List.of("booking", "class", "support", "direct").contains(type)) {
-      throw new BusinessException("INVALID_CONVERSATION_TYPE", "Loại hội thoại không hợp lệ.");
-    }
-    if (!db.isAdmin() && body.participantIds() != null && !body.participantIds().isEmpty() && bookingId == null && classId == null) {
-      throw new ForbiddenException("Bạn không được tự thêm người tham gia hội thoại.");
-    }
-    if (bookingId != null) {
-      requireBookingConversationAccess(bookingId, userId);
-    } else if (classId != null) {
-      requireClassConversationAccess(classId, userId);
-    }
-    UUID existingId = existingConversationId(type, bookingId, classId, userId);
-    if (existingId != null) {
-      return ApiResponse.ok(jdbc.queryForObject("select * from conversations where id = ?", db.conversationMapper(userId), existingId));
-    }
-
-    UUID id = jdbc.queryForObject("""
-        insert into conversations(title, type, booking_id, class_id)
-        values (?, ?, ?, ?)
-        returning id
-        """, UUID.class, body.title(), type, bookingId, classId);
+    UUID id = jdbc.queryForObject("insert into conversations(title, type) values (?, coalesce(?, 'direct')) returning id",
+        UUID.class, firstString(body, "title"), firstString(body, "type"));
     jdbc.update("insert into conversation_members(conversation_id, user_id) values (?, ?) on conflict do nothing", id, userId);
-
-    if (bookingId != null) {
-      addBookingConversationMembers(id, bookingId, userId);
-    } else if (classId != null) {
-      addClassConversationMembers(id, classId, userId);
-    } else if ("support".equals(type)) {
-      addSupportConversationMembers(id);
-    } else if (db.isAdmin()) {
-      for (UUID member : body.participantIds() == null ? List.<UUID>of() : body.participantIds()) {
-        jdbc.update("insert into conversation_members(conversation_id, user_id) values (?, ?) on conflict do nothing", id, member);
-      }
-    } else {
-      throw new ForbiddenException("Hội thoại cần gắn với booking, lớp học hoặc kênh hỗ trợ.");
+    for (Object member : list(body.get("participantIds"))) {
+      jdbc.update("insert into conversation_members(conversation_id, user_id) values (?, ?) on conflict do nothing", id, uuid(member));
     }
-    if (body.initialMessage() != null && !body.initialMessage().isBlank()) {
-      jdbc.update("insert into messages(conversation_id, sender_id, content, message_type) values (?, ?, ?, 'text')", id, userId, body.initialMessage().trim());
-      jdbc.update("update conversations set updated_at = now() where id = ?", id);
-    }
-    db.auditCurrent("conversation.create", "conversation", id, "Tạo hội thoại theo ngữ cảnh nghiệp vụ.");
     return ApiResponse.ok(jdbc.queryForObject("select * from conversations where id = ?", db.conversationMapper(userId), id));
   }
 
@@ -1193,32 +1367,48 @@ public class PlatformController {
   @GetMapping("/notifications")
   public ApiResponse<List<Map<String, Object>>> notifications() {
     UUID userId = db.currentUserIdOrThrow();
-    return ApiResponse.ok(jdbc.query("select * from notifications where user_id = ? order by created_at desc", db.notificationMapper(), userId));
+    return ApiResponse.ok(jdbc.query("select * from notifications where user_id = ? and deleted_at is null order by created_at desc", db.notificationMapper(), userId));
   }
 
   @GetMapping("/notifications/unread-count")
   public ApiResponse<Map<String, Object>> unreadCount() {
     UUID userId = db.currentUserIdOrThrow();
-    Integer count = jdbc.queryForObject("select count(*) from notifications where user_id = ? and status = 'unread'", Integer.class, userId);
+    Integer count = jdbc.queryForObject("select count(*) from notifications where user_id = ? and status = 'unread' and deleted_at is null", Integer.class, userId);
     return ApiResponse.ok(Map.of("count", count));
   }
 
+  @PatchMapping("/notifications/{notificationId}/read")
   @PostMapping("/notifications/{notificationId}/read")
   public ApiResponse<Map<String, Object>> markNotificationRead(@PathVariable UUID notificationId) {
     UUID userId = db.currentUserIdOrThrow();
-    jdbc.update("update notifications set status = 'read', read_at = now() where id = ? and user_id = ?", notificationId, userId);
+    jdbc.update("update notifications set status = 'read', read_at = now() where id = ? and user_id = ? and deleted_at is null", notificationId, userId);
     return ApiResponse.ok(Map.of("success", true));
   }
 
+  @PatchMapping("/notifications/read-all")
   @PostMapping("/notifications/read-all")
   public ApiResponse<Map<String, Object>> readAllNotifications() {
-    jdbc.update("update notifications set status = 'read', read_at = now() where user_id = ?", db.currentUserIdOrThrow());
+    jdbc.update("update notifications set status = 'read', read_at = now() where user_id = ? and deleted_at is null", db.currentUserIdOrThrow());
+    return ApiResponse.ok(Map.of("success", true));
+  }
+
+  @DeleteMapping("/notifications/{notificationId}")
+  public ApiResponse<Map<String, Object>> deleteNotification(@PathVariable UUID notificationId) {
+    jdbc.update("update notifications set deleted_at = now(), updated_at = now() where id = ? and user_id = ?",
+        notificationId, db.currentUserIdOrThrow());
+    return ApiResponse.ok(Map.of("success", true));
+  }
+
+  @DeleteMapping("/notifications")
+  public ApiResponse<Map<String, Object>> deleteAllNotifications() {
+    jdbc.update("update notifications set deleted_at = now(), updated_at = now() where user_id = ? and deleted_at is null",
+        db.currentUserIdOrThrow());
     return ApiResponse.ok(Map.of("success", true));
   }
 
   @GetMapping("/admin/notifications")
   public ApiResponse<List<Map<String, Object>>> adminNotifications() {
-    return ApiResponse.ok(jdbc.query("select * from notifications order by created_at desc limit 500", db.notificationMapper()));
+    return ApiResponse.ok(jdbc.query("select * from notifications where deleted_at is null order by created_at desc limit 500", db.notificationMapper()));
   }
 
   @PostMapping("/admin/notifications/send")
@@ -1241,15 +1431,16 @@ public class PlatformController {
     return ApiResponse.ok(payment);
   }
 
-  @PostMapping("/payments/{paymentId}/mock-pay")
-  public ApiResponse<Map<String, Object>> mockPay(@PathVariable UUID paymentId) {
-    return ApiResponse.ok(paymentService.mockPay(paymentId), "Đã ghi nhận thanh toán demo.");
-  }
-
   @GetMapping("/tutor/earnings")
   public ApiResponse<List<Map<String, Object>>> tutorEarnings() {
     UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
     return ApiResponse.ok(jdbc.query("select * from tutor_earnings where tutor_id = ? order by created_at desc", db.earningMapper(), tutorId));
+  }
+
+  @GetMapping("/tutor/payments")
+  public ApiResponse<List<Map<String, Object>>> tutorPayments() {
+    UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
+    return ApiResponse.ok(jdbc.query("select * from payments where tutor_id = ? order by created_at desc", db.paymentMapper(), tutorId));
   }
 
   @GetMapping("/tutor/payouts")
@@ -1264,16 +1455,20 @@ public class PlatformController {
 
   @PostMapping("/tutor/payouts")
   @Transactional
-  public ApiResponse<Map<String, Object>> createPayout(@Valid @RequestBody CreatePayoutRequest body) {
-    UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
-    int amount = body.amount();
+  public ApiResponse<Map<String, Object>> createPayout(@RequestBody Map<String, Object> body) {
+    UUID userId = db.currentUserIdOrThrow();
+    if (!hasApprovedVerification(userId, "tutor_identity", "tutor_certificate")) {
+      throw new BusinessException("TUTOR_VERIFICATION_REQUIRED", "Gia sư cần hoàn tất xác thực giấy tờ trước khi rút tiền.");
+    }
+    UUID tutorId = db.tutorIdByUserOrThrow(userId);
+    int amount = integer(body, "amount");
     List<Map<String, Object>> availableEarnings = availableEarningsForUpdate(tutorId);
     int balance = availableEarnings.stream().mapToInt(row -> ((Number) row.get("netAmount")).intValue()).sum();
     if (amount <= 0 || amount > balance) throw new BusinessException("INVALID_PAYOUT_AMOUNT", "Số tiền rút vượt quá số dư khả dụng.");
     UUID id = jdbc.queryForObject("""
         insert into payouts(tutor_id, amount, bank_name, bank_account, account_holder, status)
         values (?, ?, ?, ?, ?, 'pending') returning id
-        """, UUID.class, tutorId, amount, body.bankName(), body.bankAccount(), body.accountHolder());
+        """, UUID.class, tutorId, amount, firstString(body, "bankName"), firstString(body, "bankAccount"), firstString(body, "accountHolder"));
     allocatePayoutEarnings(id, availableEarnings, amount);
     db.auditCurrent("tutor.create_payout", "payout", id, "Gia sư đã yêu cầu rút " + amount + " VND.");
     return ApiResponse.ok(payoutById(id));
@@ -1290,8 +1485,8 @@ public class PlatformController {
   }
 
   @PostMapping("/admin/payments/{paymentId}/mark-paid")
-  public ApiResponse<Map<String, Object>> markPaid(@PathVariable UUID paymentId, @Valid @RequestBody AdminMarkPaymentRequest body) {
-    return ApiResponse.ok(paymentService.adminMarkPaid(paymentId, body.reason()), "Đã ghi nhận thanh toán thành công.");
+  public ApiResponse<Map<String, Object>> markPaid(@PathVariable UUID paymentId, @RequestBody(required = false) Map<String, Object> body) {
+    return ApiResponse.ok(paymentService.adminMarkPaid(paymentId, body == null ? null : firstString(body, "reason", "note")), "Đã ghi nhận thanh toán thành công.");
   }
 
   @PostMapping("/admin/payments/{paymentId}/mark-failed")
@@ -1300,8 +1495,8 @@ public class PlatformController {
   }
 
   @PostMapping("/admin/payments/{paymentId}/refund")
-  public ApiResponse<Map<String, Object>> refund(@PathVariable UUID paymentId, @Valid @RequestBody RefundRequest body) {
-    return ApiResponse.ok(paymentService.refund(paymentId, body.toMap()), "Đã xử lý hoàn tiền.");
+  public ApiResponse<Map<String, Object>> refund(@PathVariable UUID paymentId, @RequestBody(required = false) Map<String, Object> body) {
+    return ApiResponse.ok(paymentService.refund(paymentId, body == null ? Map.of() : body), "Đã xử lý hoàn tiền.");
   }
 
   @GetMapping("/admin/payouts")
@@ -1322,8 +1517,8 @@ public class PlatformController {
   @Transactional
   public ApiResponse<Map<String, Object>> approvePayout(@PathVariable UUID payoutId) {
     Map<String, Object> payout = payoutById(payoutId);
-    statusPolicy.requirePayout(payout.get("status").toString(), "completed");
-    jdbc.update("update payouts set status = 'completed', processed_by = ?, processed_at = now(), updated_at = now() where id = ?", db.currentUserIdOrThrow(), payoutId);
+    statusPolicy.requirePayout(payout.get("status").toString(), "paid");
+    jdbc.update("update payouts set status = 'paid', processed_by = ?, processed_at = now(), updated_at = now() where id = ?", db.currentUserIdOrThrow(), payoutId);
     UUID tutorId = jdbc.queryForObject("select tutor_id from payouts where id = ?", UUID.class, payoutId);
     jdbc.update("""
         update tutor_earnings te
@@ -1342,10 +1537,10 @@ public class PlatformController {
 
   @PostMapping("/admin/payouts/{payoutId}/reject")
   @Transactional
-  public ApiResponse<Map<String, Object>> rejectPayout(@PathVariable UUID payoutId, @Valid @RequestBody RejectPayoutRequest body) {
+  public ApiResponse<Map<String, Object>> rejectPayout(@PathVariable UUID payoutId, @RequestBody Map<String, Object> body) {
     Map<String, Object> payout = payoutById(payoutId);
     statusPolicy.requirePayout(payout.get("status").toString(), "rejected");
-    String reason = body.reason();
+    String reason = requiredReason(body);
     jdbc.update("update payouts set status = 'rejected', admin_note = ?, processed_by = ?, processed_at = now(), updated_at = now() where id = ?",
         reason, db.currentUserIdOrThrow(), payoutId);
     UUID tutorId = jdbc.queryForObject("select tutor_id from payouts where id = ?", UUID.class, payoutId);
@@ -1477,45 +1672,16 @@ public class PlatformController {
   }
 
   @PostMapping(value = "/uploads", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-  public ApiResponse<UploadedFileResponse> upload(
+  public ApiResponse<Map<String, Object>> upload(
       @RequestParam("file") MultipartFile file,
-      @RequestParam(defaultValue = "private") String visibility
+      @RequestParam(defaultValue = "private") String visibility,
+      @RequestParam(defaultValue = "general") String purpose
   ) throws IOException {
-    if (file.isEmpty()) throw new BusinessException("EMPTY_FILE", "File rỗng.");
-    if (file.getSize() > 10 * 1024 * 1024) throw new BusinessException("FILE_TOO_LARGE", "File tối đa 10MB.");
-    String mime = valueOr(file.getContentType(), "application/octet-stream");
-    if (!List.of("image/jpeg", "image/png", "image/webp", "application/pdf").contains(mime)) {
-      throw new BusinessException("INVALID_FILE_TYPE", "Chỉ hỗ trợ JPG, PNG, WEBP hoặc PDF.");
+    StoredFile stored = fileStorage.store(file, db.currentUserIdOrThrow(), visibility, purpose);
+    if ("private".equals(stored.visibility())) {
+      db.auditCurrent("file.upload_private", "uploadedFile", stored.id(), "Người dùng tải lên file riêng tư.");
     }
-    String normalizedVisibility = "public".equalsIgnoreCase(visibility) ? "public" : "private";
-    UUID owner = db.currentUserIdOrThrow();
-    String originalName = file.getOriginalFilename() == null ? "upload.bin" : file.getOriginalFilename().replaceAll("[^a-zA-Z0-9._-]", "_");
-    String storedName = UUID.randomUUID() + extensionFor(originalName, mime);
-    Path root = Path.of(properties.upload().dir()).toAbsolutePath().normalize();
-    Path dir = root.resolve(normalizedVisibility).normalize();
-    if (!dir.startsWith(root)) throw new BusinessException("INVALID_UPLOAD_PATH", "Đường dẫn upload không hợp lệ.");
-    Files.createDirectories(dir);
-    Files.copy(file.getInputStream(), dir.resolve(storedName), StandardCopyOption.REPLACE_EXISTING);
-    String storagePath = normalizedVisibility + "/" + storedName;
-    UUID id = jdbc.queryForObject("""
-        insert into uploaded_files(owner_id, file_name, original_file_name, file_url, file_size, mime_type, storage_path, visibility)
-        values (?, ?, ?, ?, ?, ?, ?, ?) returning id
-        """, UUID.class, owner, storedName, originalName, "/api/v1/files/pending", file.getSize(), mime, storagePath, normalizedVisibility);
-    String url = "/api/v1/files/" + id;
-    jdbc.update("update uploaded_files set file_url = ?, updated_at = now() where id = ?", url, id);
-    if ("private".equals(normalizedVisibility)) {
-      db.auditCurrent("file.upload_private", "uploadedFile", id, "Người dùng tải lên file riêng tư.");
-    }
-    return ApiResponse.ok(new UploadedFileResponse(
-        id.toString(),
-        id.toString(),
-        storedName,
-        originalName,
-        url,
-        file.getSize(),
-        mime,
-        normalizedVisibility
-    ));
+    return ApiResponse.ok(fileStorage.response(stored));
   }
 
   private ApiResponse<Map<String, Object>> updateTutorStatus(UUID tutorId, String status, String reason) {
@@ -1600,43 +1766,6 @@ public class PlatformController {
     }
   }
 
-  private Map<String, Object> bookingForAssignedRequest(UUID requestId, Map<String, Object> request, UUID tutorId, Map<String, Object> body) {
-    Optional<Map<String, Object>> existing = db.optional("""
-        select tb.*, s.name subject_name, gl.name grade_name
-        from trial_bookings tb
-        join subjects s on s.id = tb.subject_id
-        left join grade_levels gl on gl.id = tb.grade_level_id
-        where tb.learning_request_id = ?
-          and tb.status not in ('converted','cancelled','expired')
-        order by tb.created_at desc
-        limit 1
-        """, db.bookingMapper(), requestId);
-    if (existing.isPresent()) {
-      Map<String, Object> booking = existing.get();
-      if (!tutorId.equals(uuid(booking.get("tutorId")))) {
-        throw new BusinessException("ACTIVE_BOOKING_EXISTS", "Yêu cầu này đã có booking chưa kết thúc với gia sư khác.");
-      }
-      return booking;
-    }
-    return createAssignedBooking(requestId, request, tutorId, body);
-  }
-
-  private Map<String, Object> createAssignedBooking(UUID requestId, Map<String, Object> request, UUID tutorId, Map<String, Object> body) {
-    UUID studentId = uuid(request.get("userId"));
-    String learningMode = normalizeOnlineOffline(valueOr(firstString(body, "learningMode", "mode"), valueOr(string(request, "learningMode"), "online")));
-    if ("both".equals(learningMode)) learningMode = "online";
-    UUID bookingId = jdbc.queryForObject("""
-        insert into trial_bookings(learning_request_id, student_id, tutor_id, subject_id, grade_level_id,
-          student_name, parent_name, phone, email, preferred_time, learning_mode, goal, status)
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'assigned')
-        returning id
-        """, UUID.class, requestId, studentId, tutorId, uuid(request.get("subjectId")), uuidOrNull(request.get("gradeLevelId")),
-        string(request, "studentName"), string(request, "parentName"), string(request, "phone"), string(request, "email"),
-        string(request, "preferredSchedule"), learningMode, valueOr(string(request, "learningGoal"), string(request, "goal")));
-    db.auditCurrent("admin.create_assigned_booking", "booking", bookingId, "Admin tạo booking học thử khi gán gia sư cho yêu cầu học.");
-    return db.bookingById(bookingId);
-  }
-
   @Transactional
   private void scheduleBookingInternal(UUID bookingId, Map<String, Object> body) {
     String start = firstString(body, "scheduledStart", "startTime");
@@ -1677,6 +1806,11 @@ public class PlatformController {
 
   @Transactional
   private void completeSessionInternal(UUID sessionId, String tutorNote) {
+    String lockedStatus = jdbc.queryForObject("select status from class_sessions where id = ? for update", String.class, sessionId);
+    if ("completed".equals(lockedStatus)) {
+      db.auditCurrent("session.complete_idempotent", "session", sessionId, "Bỏ qua yêu cầu hoàn thành trùng lặp vì buổi học đã hoàn thành.");
+      return;
+    }
     Map<String, Object> session = db.sessionById(sessionId);
     statusPolicy.requireSession(session.get("status").toString(), "completed");
     UUID classId = uuid(session.get("classId"));
@@ -1802,8 +1936,16 @@ public class PlatformController {
         (rs, row) -> Map.of(label, rs.getString("value"), "count", rs.getInt("count")));
   }
 
-  private Map<String, Object> profile(String table, UUID userId) {
-    return jdbc.queryForMap("select * from " + table + " where user_id = ?", userId);
+  private Map<String, Object> studentProfileByUser(UUID userId) {
+    return db.required("select * from student_profiles where user_id = ?", studentProfileMapper(), userId);
+  }
+
+  private Map<String, Object> parentProfileByUser(UUID userId) {
+    return db.required("select * from parent_profiles where user_id = ?", parentProfileMapper(), userId);
+  }
+
+  private List<String> favoriteTutorIdsForUser(UUID userId) {
+    return jdbc.query("select tutor_id::text from tutor_favorites where user_id = ? order by created_at desc", (rs, row) -> rs.getString(1), userId);
   }
 
   private int count(String table) {
@@ -1816,6 +1958,56 @@ public class PlatformController {
 
   private Map<String, Object> contactById(UUID contactId) {
     return jdbc.queryForObject("select * from contact_requests where id = ?", contactMapper(), contactId);
+  }
+
+  private org.springframework.jdbc.core.RowMapper<Map<String, Object>> studentProfileMapper() {
+    return (rs, row) -> {
+      UUID userId = rs.getObject("user_id", UUID.class);
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", rs.getObject("id").toString());
+      m.put("userId", userId.toString());
+      m.put("studentName", db.userById(userId).map(user -> user.get("fullName").toString()).orElse(""));
+      m.put("grade", rs.getString("grade_level"));
+      m.put("gradeLevel", rs.getString("grade_level"));
+      m.put("school", rs.getString("school"));
+      m.put("learningGoals", splitGoals(rs.getString("learning_goals")));
+      m.put("favoriteTutorIds", favoriteTutorIdsForUser(userId));
+      m.put("preferredLearningMode", rs.getString("preferred_learning_mode"));
+      m.put("address", rs.getString("address"));
+      m.put("province", rs.getString("province"));
+      m.put("district", rs.getString("district"));
+      m.put("createdAt", rs.getObject("created_at", OffsetDateTime.class).toString());
+      m.put("updatedAt", rs.getObject("updated_at", OffsetDateTime.class).toString());
+      return m;
+    };
+  }
+
+  private org.springframework.jdbc.core.RowMapper<Map<String, Object>> parentProfileMapper() {
+    return (rs, row) -> {
+      UUID userId = rs.getObject("user_id", UUID.class);
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", rs.getObject("id").toString());
+      m.put("userId", userId.toString());
+      m.put("parentName", db.userById(userId).map(user -> user.get("fullName").toString()).orElse(""));
+      m.put("studentIds", List.of());
+      m.put("relationship", rs.getString("relationship_to_student"));
+      m.put("studentName", rs.getString("student_name"));
+      m.put("studentGrade", rs.getString("student_grade"));
+      m.put("address", rs.getString("address"));
+      m.put("province", rs.getString("province"));
+      m.put("district", rs.getString("district"));
+      m.put("createdAt", rs.getObject("created_at", OffsetDateTime.class).toString());
+      m.put("updatedAt", rs.getObject("updated_at", OffsetDateTime.class).toString());
+      return m;
+    };
+  }
+
+  private List<String> splitGoals(String goals) {
+    if (goals == null || goals.isBlank()) return List.of();
+    return java.util.Arrays.stream(goals.split(","))
+        .map(String::trim)
+        .filter(item -> !item.isBlank())
+        .toList();
   }
 
   private org.springframework.jdbc.core.RowMapper<Map<String, Object>> contactMapper() {
@@ -1898,82 +2090,61 @@ public class PlatformController {
     throw new ForbiddenException("Bạn không có quyền xem lớp học này.");
   }
 
+  private void requireStudentOrParent() {
+    String role = db.currentUserOrThrow().get("role").toString();
+    if (!List.of("student", "parent").contains(role)) {
+      throw new ForbiddenException("Chức năng này dành cho học sinh hoặc phụ huynh.");
+    }
+  }
+
+  private boolean hasApprovedVerification(UUID userId, String... types) {
+    if (types == null || types.length == 0) return false;
+    String placeholders = String.join(",", java.util.Collections.nCopies(types.length, "?"));
+    List<Object> args = new ArrayList<>();
+    args.add(userId);
+    args.addAll(List.of(types));
+    Integer count = jdbc.queryForObject("""
+        select count(*) from user_verifications
+        where user_id = ? and status = 'approved' and verification_type in (
+        """ + placeholders + ")", Integer.class, args.toArray());
+    return count != null && count > 0;
+  }
+
+  private Map<String, Object> publicLearningRequestResponse(Map<String, Object> request) {
+    Map<String, Object> m = new LinkedHashMap<>();
+    m.put("id", request.get("id"));
+    m.put("requestCode", request.get("requestCode"));
+    m.put("subject", request.get("subject"));
+    m.put("grade", request.get("grade"));
+    m.put("teachingMode", request.get("teachingMode"));
+    m.put("learningMode", request.get("learningMode"));
+    m.put("province", request.get("province"));
+    m.put("district", request.get("district"));
+    m.put("location", locationSummary(string(request, "province"), string(request, "district")));
+    m.put("budgetMin", request.get("budgetMin"));
+    m.put("budgetMax", request.get("budgetMax"));
+    m.put("expectedFee", request.get("expectedFee"));
+    m.put("preferredSchedule", request.get("preferredSchedule"));
+    m.put("status", request.get("status"));
+    m.put("createdAt", request.get("createdAt"));
+    return m;
+  }
+
+  private String locationSummary(String province, String district) {
+    if (province == null || province.isBlank()) return district == null ? "" : district;
+    if (district == null || district.isBlank()) return province;
+    return district + ", " + province;
+  }
+
+  private Integer nullableInt(java.sql.ResultSet rs, String column) throws java.sql.SQLException {
+    Object value = rs.getObject(column);
+    return value == null ? null : ((Number) value).intValue();
+  }
+
   private void requireConversationMember(UUID conversationId, UUID userId) {
     if (db.isAdmin()) return;
     if (!exists("select 1 from conversation_members where conversation_id = ? and user_id = ?", conversationId, userId)) {
       throw new ForbiddenException("Bạn không có quyền xem hội thoại này.");
-    }
-  }
-
-  private UUID existingConversationId(String type, UUID bookingId, UUID classId, UUID userId) {
-    if (bookingId != null) {
-      return db.optional("""
-          select id from conversations
-          where booking_id = ? and type = 'booking'
-          order by created_at desc
-          limit 1
-          """, (rs, row) -> rs.getObject("id", UUID.class), bookingId).orElse(null);
-    }
-    if (classId != null) {
-      return db.optional("""
-          select id from conversations
-          where class_id = ? and type = 'class'
-          order by created_at desc
-          limit 1
-          """, (rs, row) -> rs.getObject("id", UUID.class), classId).orElse(null);
-    }
-    if ("support".equals(type)) {
-      return db.optional("""
-          select c.id from conversations c
-          join conversation_members cm on cm.conversation_id = c.id and cm.user_id = ?
-          where c.type = 'support'
-          order by c.created_at desc
-          limit 1
-          """, (rs, row) -> rs.getObject("id", UUID.class), userId).orElse(null);
-    }
-    return null;
-  }
-
-  private void addBookingConversationMembers(UUID conversationId, UUID bookingId, UUID actorId) {
-    Map<String, Object> booking = db.bookingById(bookingId);
-    UUID studentId = uuid(booking.get("studentId"));
-    UUID tutorId = uuid(booking.get("tutorId"));
-    UUID tutorUserId = jdbc.queryForObject("select user_id from tutor_profiles where id = ?", UUID.class, tutorId);
-    jdbc.update("insert into conversation_members(conversation_id, user_id) values (?, ?) on conflict do nothing", conversationId, studentId);
-    jdbc.update("insert into conversation_members(conversation_id, user_id) values (?, ?) on conflict do nothing", conversationId, tutorUserId);
-  }
-
-  private void addClassConversationMembers(UUID conversationId, UUID classId, UUID actorId) {
-    Map<String, Object> c = db.classById(classId);
-    UUID studentId = uuid(c.get("studentId"));
-    UUID tutorId = uuid(c.get("tutorId"));
-    UUID tutorUserId = jdbc.queryForObject("select user_id from tutor_profiles where id = ?", UUID.class, tutorId);
-    jdbc.update("insert into conversation_members(conversation_id, user_id) values (?, ?) on conflict do nothing", conversationId, studentId);
-    jdbc.update("insert into conversation_members(conversation_id, user_id) values (?, ?) on conflict do nothing", conversationId, tutorUserId);
-  }
-
-  private void requireBookingConversationAccess(UUID bookingId, UUID actorId) {
-    Map<String, Object> booking = db.bookingById(bookingId);
-    UUID studentId = uuid(booking.get("studentId"));
-    UUID tutorId = uuid(booking.get("tutorId"));
-    UUID tutorUserId = jdbc.queryForObject("select user_id from tutor_profiles where id = ?", UUID.class, tutorId);
-    boolean allowed = db.isAdmin() || actorId.equals(studentId) || actorId.equals(tutorUserId);
-    if (!allowed) throw new ForbiddenException("Bạn không có quyền tạo hội thoại cho booking này.");
-  }
-
-  private void requireClassConversationAccess(UUID classId, UUID actorId) {
-    Map<String, Object> c = db.classById(classId);
-    UUID studentId = uuid(c.get("studentId"));
-    UUID tutorId = uuid(c.get("tutorId"));
-    UUID tutorUserId = jdbc.queryForObject("select user_id from tutor_profiles where id = ?", UUID.class, tutorId);
-    boolean allowed = db.isAdmin() || actorId.equals(studentId) || actorId.equals(tutorUserId);
-    if (!allowed) throw new ForbiddenException("Bạn không có quyền tạo hội thoại cho lớp này.");
-  }
-
-  private void addSupportConversationMembers(UUID conversationId) {
-    List<UUID> admins = jdbc.query("select id from users where role = 'admin' and status = 'active'", (rs, row) -> rs.getObject("id", UUID.class));
-    for (UUID admin : admins) {
-      jdbc.update("insert into conversation_members(conversation_id, user_id) values (?, ?) on conflict do nothing", conversationId, admin);
     }
   }
 
@@ -2058,6 +2229,12 @@ public class PlatformController {
   private String normalizeDateTime(String value) {
     if (value.endsWith("Z") || value.contains("+")) return value;
     return OffsetDateTime.parse(value + ZoneOffset.UTC).toString();
+  }
+
+  private OffsetDateTime optionalDateTime(Map<String, Object> body, String... keys) {
+    String value = firstString(body, keys);
+    if (value == null) return null;
+    return OffsetDateTime.parse(normalizeDateTime(value));
   }
 
   private String jsonValue(Object value) {

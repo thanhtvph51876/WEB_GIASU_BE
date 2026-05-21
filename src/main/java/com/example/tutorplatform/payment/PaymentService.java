@@ -10,7 +10,6 @@ import com.example.tutorplatform.payment.gateway.dto.CreateCheckoutResponse;
 import com.example.tutorplatform.payment.gateway.dto.GatewayPaymentStatus;
 import com.example.tutorplatform.payment.gateway.dto.VerifyWebhookRequest;
 import com.example.tutorplatform.payment.gateway.dto.VerifyWebhookResponse;
-import com.example.tutorplatform.policy.StatusTransitionPolicy;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,21 +34,19 @@ public class PaymentService {
   private final DbService db;
   private final JdbcTemplate jdbc;
   private final PaymentGatewayFactory gatewayFactory;
-  private final StatusTransitionPolicy statusPolicy;
   private final ObjectMapper objectMapper = new ObjectMapper();
 
-  public PaymentService(DbService db, PaymentGatewayFactory gatewayFactory, StatusTransitionPolicy statusPolicy) {
+  public PaymentService(DbService db, PaymentGatewayFactory gatewayFactory) {
     this.db = db;
     this.jdbc = db.jdbc();
     this.gatewayFactory = gatewayFactory;
-    this.statusPolicy = statusPolicy;
   }
 
   public Map<String, Object> settings() {
     Map<String, Object> data = new LinkedHashMap<>();
     data.put("paymentMode", gatewayFactory.paymentMode());
-    data.put("enabledGateways", jsonListSetting("enabledGateways", List.of("mock")));
-    data.put("defaultGateway", gatewayFactory.setting("defaultGateway", "mock"));
+    data.put("enabledGateways", jsonListSetting("enabledGateways", List.of("bank_qr")));
+    data.put("defaultGateway", gatewayFactory.setting("defaultGateway", "bank_qr"));
     data.put("paymentTimeoutMinutes", gatewayFactory.paymentTimeoutMinutes());
     data.put("refundPolicy", gatewayFactory.setting("refundPolicy", "Hoàn tiền theo chính sách dịch vụ."));
     data.put("invoicePrefix", gatewayFactory.setting("invoicePrefix", "INV"));
@@ -145,18 +142,6 @@ public class PaymentService {
   }
 
   @Transactional
-  public Map<String, Object> mockPay(UUID paymentId) {
-    if (!gatewayFactory.isMockMode()) {
-      throw new BusinessException("MOCK_PAYMENT_DISABLED", "Mock-pay chỉ được bật trong paymentMode=mock.", HttpStatus.FORBIDDEN);
-    }
-    Map<String, Object> payment = paymentByIdForUpdate(paymentId);
-    requirePaymentOwner(payment);
-    Map<String, Object> updated = applyPaid(payment, "mock", existingGatewayOrder(paymentId, "mock"), "mock-tx-" + paymentId, true);
-    db.auditCurrent("payment.mock_paid", "payment", paymentId, "Người dùng thanh toán demo trong chế độ mock.");
-    return updated;
-  }
-
-  @Transactional
   public Map<String, Object> adminMarkPaid(UUID paymentId, String reason) {
     requireAdmin();
     if (reason == null || reason.isBlank()) {
@@ -181,10 +166,7 @@ public class PaymentService {
     requireAdmin();
     Map<String, Object> payment = paymentByIdForUpdate(paymentId);
     int amount = body.get("amount") == null ? number(payment.get("amount")) : number(body.get("amount"));
-    String reason = string(body, "reason");
-    if (reason == null || reason.isBlank()) {
-      throw new BusinessException("REASON_REQUIRED", "Cần nhập lý do hoàn tiền.");
-    }
+    String reason = valueOr(string(body, "reason"), "Hoàn tiền theo yêu cầu vận hành.");
     if (amount <= 0 || amount > number(payment.get("amount"))) {
       throw new BusinessException("INVALID_REFUND_AMOUNT", "Số tiền hoàn không hợp lệ.");
     }
@@ -197,8 +179,7 @@ public class PaymentService {
       throw new BusinessException("INVALID_REFUND_AMOUNT", "Số tiền hoàn vượt quá phần còn lại của giao dịch.");
     }
     String nextStatus = amount == remaining ? "refunded" : "partially_refunded";
-    statusPolicy.requirePayment(value(payment.get("status")), nextStatus);
-    String gateway = valueOr(value(payment.get("gateway")), "mock");
+    String gateway = valueOr(value(payment.get("gateway")), "bank_qr");
     String gatewayRefundId = gatewayFactory.resolve(gateway).refund(latestGatewayTransactionId(paymentId), amount, reason);
     jdbc.update("""
         insert into payment_refunds(payment_id, amount, reason, status, gateway_refund_id, requested_by, processed_by)
@@ -297,7 +278,6 @@ public class PaymentService {
     if (!List.of("pending", "processing", "failed", "expired").contains(value(payment.get("status")))) {
       throw new BusinessException("INVALID_PAYMENT_TRANSITION", "Trạng thái thanh toán hiện tại không thể chuyển sang đã thanh toán.");
     }
-    statusPolicy.requirePayment(value(payment.get("status")), "paid");
 
     upsertSuccessfulTransaction(payment, gateway, gatewayOrderId, gatewayTransactionId, manual);
     jdbc.update("""
@@ -362,7 +342,6 @@ public class PaymentService {
   private void markPaymentTerminal(UUID paymentId, String status, String title, String message) {
     Map<String, Object> payment = paymentByIdForUpdate(paymentId);
     if (List.of("paid", "completed", "refunded").contains(value(payment.get("status")))) return;
-    statusPolicy.requirePayment(value(payment.get("status")), status);
     jdbc.update("update payments set status = ?, updated_at = now() where id = ?", status, paymentId);
     if (List.of("failed", "cancelled", "expired").contains(status)) {
       jdbc.update("update tutor_earnings set status = 'cancelled', updated_at = now() where payment_id = ? and status = 'pending'", paymentId);
@@ -373,7 +352,6 @@ public class PaymentService {
   private void markGatewayRefunded(UUID paymentId, int amount, String reason) {
     Map<String, Object> payment = paymentByIdForUpdate(paymentId);
     if ("refunded".equals(value(payment.get("status")))) return;
-    statusPolicy.requirePayment(value(payment.get("status")), "refunded");
     jdbc.update("""
         insert into payment_refunds(payment_id, amount, reason, status, gateway_refund_id)
         values (?, ?, ?, 'succeeded', ?)
@@ -422,13 +400,39 @@ public class PaymentService {
     if (!ids.isEmpty()) {
       return new WebhookEventInsert(ids.getFirst(), true);
     }
-    UUID existing = jdbc.queryForObject("""
-        select id from payment_webhook_events
-        where gateway = ? and event_id = ?
-        order by received_at desc
-        limit 1
-        """, UUID.class, gateway, verified.eventId());
+    UUID existing = existingWebhookEventId(gateway, verified);
     return new WebhookEventInsert(existing, false);
+  }
+
+  private UUID existingWebhookEventId(String gateway, VerifyWebhookResponse verified) {
+    if (verified.eventId() != null) {
+      UUID existing = db.optional("""
+          select id from payment_webhook_events
+          where gateway = ? and event_id = ?
+          order by received_at desc
+          limit 1
+          """, (rs, row) -> rs.getObject("id", UUID.class), gateway, verified.eventId()).orElse(null);
+      if (existing != null) return existing;
+    }
+    if (verified.gatewayTransactionId() != null) {
+      UUID existing = db.optional("""
+          select id from payment_webhook_events
+          where gateway = ? and gateway_transaction_id = ?
+          order by received_at desc
+          limit 1
+          """, (rs, row) -> rs.getObject("id", UUID.class), gateway, verified.gatewayTransactionId()).orElse(null);
+      if (existing != null) return existing;
+    }
+    if (verified.gatewayOrderId() != null) {
+      UUID existing = db.optional("""
+          select id from payment_webhook_events
+          where gateway = ? and gateway_order_id = ?
+          order by received_at desc
+          limit 1
+          """, (rs, row) -> rs.getObject("id", UUID.class), gateway, verified.gatewayOrderId()).orElse(null);
+      if (existing != null) return existing;
+    }
+    throw new BusinessException("WEBHOOK_EVENT_CONFLICT", "Webhook bị trùng nhưng không tìm thấy event hiện có.");
   }
 
   private void markWebhookEvent(UUID eventId, boolean processed, String error) {

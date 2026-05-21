@@ -26,13 +26,59 @@ public class FilePolicy {
       Object ownerId = file.get("ownerId");
       if (ownerId != null && userId.equals(UUID.fromString(ownerId.toString()))) return true;
       UUID fileId = UUID.fromString(file.get("id").toString());
-      Integer tutorOwnedDocument = jdbc.queryForObject("""
+      if (exists("""
           select count(*)
           from tutor_documents td
           join tutor_profiles tp on tp.id = td.tutor_id
           where td.file_id = ? and tp.user_id = ?
-          """, Integer.class, fileId, userId);
-      return tutorOwnedDocument != null && tutorOwnedDocument > 0;
+          """, fileId, userId)) {
+        return true;
+      }
+      String entityType = file.get("entityType") == null ? null : file.get("entityType").toString();
+      UUID entityId = uuidOrNull(file.get("entityId"));
+      if (entityType == null || entityId == null) return false;
+      return switch (entityType) {
+        case "verification" -> exists("select count(*) from user_verifications where id = ? and user_id = ?", entityId, userId);
+        case "booking" -> exists("""
+            select count(*)
+            from trial_bookings tb
+            left join tutor_profiles tp on tp.id = tb.tutor_id
+            where tb.id = ? and (tb.student_id = ? or tp.user_id = ?)
+            """, entityId, userId, userId);
+        case "class" -> exists("""
+            select count(*)
+            from tutoring_classes tc
+            left join tutor_profiles tp on tp.id = tc.tutor_id
+            where tc.id = ? and (tc.student_id = ? or tp.user_id = ?)
+            """, entityId, userId, userId);
+        case "session" -> exists("""
+            select count(*)
+            from class_sessions cs
+            left join tutor_profiles tp on tp.id = cs.tutor_id
+            where cs.id = ? and (cs.student_id = ? or tp.user_id = ?)
+            """, entityId, userId, userId);
+        case "payment" -> exists("""
+            select count(*)
+            from payments p
+            left join tutor_profiles tp on tp.id = p.tutor_id
+            where p.id = ? and (p.user_id = ? or tp.user_id = ?)
+            """, entityId, userId, userId);
+        default -> false;
+      };
     }).orElse(false);
+  }
+
+  private boolean exists(String sql, Object... args) {
+    Integer count = jdbc.queryForObject(sql, Integer.class, args);
+    return count != null && count > 0;
+  }
+
+  private UUID uuidOrNull(Object value) {
+    if (value == null || value.toString().isBlank()) return null;
+    try {
+      return UUID.fromString(value.toString());
+    } catch (IllegalArgumentException ex) {
+      return null;
+    }
   }
 }

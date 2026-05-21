@@ -13,7 +13,7 @@ public interface PaymentGateway {
   VerifyWebhookResponse verifyWebhook(VerifyWebhookRequest request);
 
   default VerifyWebhookResponse queryTransaction(String gatewayOrderId) {
-    throw new UnsupportedOperationException("Gateway queryTransaction is not implemented yet: " + gatewayOrderId);
+    throw new UnsupportedOperationException("Gateway không hỗ trợ truy vấn giao dịch trực tiếp: " + gatewayOrderId);
   }
 
   default String refund(String gatewayTransactionId, int amount, String reason) {

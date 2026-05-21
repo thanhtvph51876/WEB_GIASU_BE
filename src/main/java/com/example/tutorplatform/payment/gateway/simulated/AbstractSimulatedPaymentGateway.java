@@ -22,7 +22,7 @@ abstract class AbstractSimulatedPaymentGateway implements PaymentGateway {
     String code = type().code();
     String checkoutUrl = "http://localhost:3000/payments/pending?paymentId=" + request.paymentId() + "&gateway=" + code + "&orderId=" + orderId;
     String qrCodeUrl = switch (type()) {
-      case BANK_QR, PAYOS, MOMO -> "mock://qr/" + code + "/" + orderId + "/" + request.amount();
+      case BANK_QR, PAYOS, MOMO -> "sandbox://qr/" + code + "/" + orderId + "/" + request.amount();
       default -> null;
     };
     String raw = "{\"gateway\":\"" + code + "\",\"orderId\":\"" + orderId + "\",\"amount\":" + request.amount() + ",\"mode\":\"simulated\"}";

@@ -38,12 +38,15 @@ public class FileController {
 
   @GetMapping("/{fileId}")
   public ResponseEntity<InputStreamResource> download(@PathVariable UUID fileId) throws Exception {
-    Map<String, Object> file = db.required("select * from uploaded_files where id = ?", mapper(), fileId);
+    Map<String, Object> file = db.required("select * from uploaded_files where id = ? and deleted_at is null", mapper(), fileId);
     if (!filePolicy.canView(file)) {
       if (com.example.tutorplatform.security.SecurityUtils.currentUserId().isEmpty()) {
         throw new BusinessException("UNAUTHORIZED", "Bạn cần đăng nhập để xem file này.", HttpStatus.UNAUTHORIZED);
       }
       throw new ForbiddenException("Bạn không có quyền xem file này.");
+    }
+    if (db.isAdmin() && isSensitive(file)) {
+      db.auditCurrent("admin.view_sensitive_file", "uploadedFile", fileId, "Admin mở file nhạy cảm.");
     }
 
     Path path = uploadRoot.resolve(file.get("storagePath").toString()).normalize();
@@ -73,11 +76,36 @@ public class FileController {
       m.put("fileSize", rs.getLong("file_size"));
       m.put("storagePath", rs.getString("storage_path"));
       m.put("visibility", rs.getString("visibility"));
+      m.put("purpose", hasColumn(rs, "purpose") ? rs.getString("purpose") : "general");
+      m.put("sha256Hash", hasColumn(rs, "sha256_hash") ? rs.getString("sha256_hash") : null);
+      m.put("riskScore", hasColumn(rs, "risk_score") ? rs.getInt("risk_score") : 0);
       m.put("entityType", rs.getString("entity_type"));
       Object entityId = rs.getObject("entity_id");
       m.put("entityId", entityId == null ? null : entityId.toString());
       m.put("createdAt", rs.getObject("created_at", OffsetDateTime.class).toString());
       return m;
     };
+  }
+
+  private boolean isSensitive(Map<String, Object> file) {
+    if (!"private".equals(file.get("visibility"))) return false;
+    String purpose = file.get("purpose") == null ? "" : file.get("purpose").toString();
+    String entityType = file.get("entityType") == null ? "" : file.get("entityType").toString();
+    return entityType.equals("verification")
+        || purpose.equals("student_card")
+        || purpose.equals("student_selfie")
+        || purpose.equals("tutor_identity")
+        || purpose.equals("tutor_certificate")
+        || purpose.equals("tutor_document")
+        || purpose.equals("contract");
+  }
+
+  private boolean hasColumn(java.sql.ResultSet rs, String column) {
+    try {
+      rs.findColumn(column);
+      return true;
+    } catch (Exception ex) {
+      return false;
+    }
   }
 }

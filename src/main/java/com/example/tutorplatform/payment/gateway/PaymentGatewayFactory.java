@@ -39,13 +39,7 @@ public class PaymentGatewayFactory {
     }
     String mode = paymentMode().toLowerCase();
     if ("production".equals(mode)) {
-      if (type == PaymentGatewayType.MOCK) {
-        throw new BusinessException("MOCK_GATEWAY_FORBIDDEN", "Production không được dùng mock gateway.", HttpStatus.FORBIDDEN);
-      }
       throw new BusinessException("REAL_GATEWAY_REQUIRED", "Production cần adapter gateway thật trước khi nhận thanh toán.", HttpStatus.FORBIDDEN);
-    }
-    if ("sandbox".equals(mode) && type == PaymentGatewayType.MOCK) {
-      throw new BusinessException("MOCK_GATEWAY_FORBIDDEN", "Sandbox không được dùng mock gateway.", HttpStatus.FORBIDDEN);
     }
     PaymentGateway gateway = gateways.get(type);
     if (gateway == null) {
@@ -56,10 +50,6 @@ public class PaymentGatewayFactory {
 
   public String paymentMode() {
     return setting("paymentMode", properties.payment().mode());
-  }
-
-  public boolean isMockMode() {
-    return "mock".equalsIgnoreCase(paymentMode());
   }
 
   public int paymentTimeoutMinutes() {
@@ -90,7 +80,7 @@ public class PaymentGatewayFactory {
           .map(value -> value.toLowerCase().replace("-", "_"))
           .toList();
     } catch (Exception ex) {
-      return List.of("mock");
+      return List.of("bank_qr");
     }
   }
 }
