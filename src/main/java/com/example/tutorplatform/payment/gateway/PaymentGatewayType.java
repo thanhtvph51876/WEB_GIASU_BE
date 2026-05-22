@@ -1,6 +1,7 @@
 package com.example.tutorplatform.payment.gateway;
 
 public enum PaymentGatewayType {
+  MOCK,
   BANK_QR,
   VNPAY,
   MOMO,

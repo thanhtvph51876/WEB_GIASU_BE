@@ -6,18 +6,18 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "app")
 public record AppProperties(
-    Jwt jwt,
-    Cors cors,
-    Upload upload,
-    Payment payment,
-    Auth auth,
-    double commissionRate
+        Jwt jwt,
+        Cors cors,
+        Upload upload,
+        Payment payment,
+        Auth auth,
+        Seed seed,
+        double commissionRate
 ) {
   public record Jwt(String secret, long accessTokenExpireMinutes, long refreshTokenExpireDays) {
     public Duration accessTtl() {
       return Duration.ofMinutes(accessTokenExpireMinutes);
     }
-
     public Duration refreshTtl() {
       return Duration.ofDays(refreshTokenExpireDays);
     }
@@ -30,17 +30,18 @@ public record AppProperties(
   public record Payment(String mode, List<String> enabledGateways, String defaultGateway, int timeoutMinutes) {}
 
   public record Auth(
-      String frontendBaseUrl,
-      long passwordResetTokenExpireMinutes,
-      long emailVerificationTokenExpireMinutes,
-      boolean exposeDevTokens
+          String frontendBaseUrl,
+          long passwordResetTokenExpireMinutes,
+          long emailVerificationTokenExpireMinutes,
+          boolean exposeDevTokens
   ) {
     public Duration passwordResetTtl() {
       return Duration.ofMinutes(passwordResetTokenExpireMinutes);
     }
-
     public Duration emailVerificationTtl() {
       return Duration.ofMinutes(emailVerificationTokenExpireMinutes);
     }
   }
+
+  public record Seed(boolean enabled) {}
 }
