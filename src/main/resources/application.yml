@@ -41,6 +41,9 @@ app:
     enabled-gateways: ${ENABLED_GATEWAYS:bank_qr,vnpay,momo,payos,stripe}
     default-gateway: ${DEFAULT_GATEWAY:bank_qr}
     timeout-minutes: ${PAYMENT_TIMEOUT_MINUTES:30}
+    seed:
+      enabled: ${SEED_DATA_ENABLED:false}   # ← thêm dòng này
+    commission-rate: ${COMMISSION_RATE:0.15}
   auth:
     frontend-base-url: ${FRONTEND_BASE_URL:http://localhost:3000}
     password-reset-token-expire-minutes: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:30}
