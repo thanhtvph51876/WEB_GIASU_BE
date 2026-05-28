@@ -4,6 +4,7 @@ import com.example.tutorplatform.common.BusinessException;
 import com.example.tutorplatform.common.ForbiddenException;
 import com.example.tutorplatform.db.DbService;
 import com.example.tutorplatform.policy.FilePolicy;
+import com.example.tutorplatform.security.PermissionService;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -28,11 +29,13 @@ import org.springframework.web.bind.annotation.RestController;
 public class FileController {
   private final DbService db;
   private final FilePolicy filePolicy;
+  private final PermissionService permissions;
   private final Path uploadRoot;
 
-  public FileController(DbService db, FilePolicy filePolicy, com.example.tutorplatform.config.AppProperties properties) {
+  public FileController(DbService db, FilePolicy filePolicy, PermissionService permissions, com.example.tutorplatform.config.AppProperties properties) {
     this.db = db;
     this.filePolicy = filePolicy;
+    this.permissions = permissions;
     this.uploadRoot = Path.of(properties.upload().dir()).toAbsolutePath().normalize();
   }
 
@@ -45,7 +48,7 @@ public class FileController {
       }
       throw new ForbiddenException("Bạn không có quyền xem file này.");
     }
-    if (db.isAdmin() && isSensitive(file)) {
+    if (permissions.hasAnyAdminRole() && isSensitive(file)) {
       db.auditCurrent("admin.view_sensitive_file", "uploadedFile", fileId, "Admin mở file nhạy cảm.");
     }
 

@@ -6,10 +6,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "app")
 public record AppProperties(
+        String env,
         Jwt jwt,
         Cors cors,
         Upload upload,
         Payment payment,
+        Verification verification,
         Auth auth,
         Seed seed,
         double commissionRate
@@ -25,9 +27,11 @@ public record AppProperties(
 
   public record Cors(List<String> allowedOrigins) {}
 
-  public record Upload(String dir, String publicBaseUrl) {}
+  public record Upload(String dir, String publicBaseUrl, String storageProvider) {}
 
-  public record Payment(String mode, List<String> enabledGateways, String defaultGateway, int timeoutMinutes) {}
+  public record Payment(String provider, String mode, List<String> enabledGateways, String defaultGateway, int timeoutMinutes) {}
+
+  public record Verification(String provider) {}
 
   public record Auth(
           String frontendBaseUrl,

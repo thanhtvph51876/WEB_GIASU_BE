@@ -1,6 +1,7 @@
 package com.example.tutorplatform.policy;
 
 import com.example.tutorplatform.db.DbService;
+import com.example.tutorplatform.security.PermissionService;
 import com.example.tutorplatform.security.SecurityUtils;
 import java.util.Map;
 import java.util.UUID;
@@ -10,10 +11,12 @@ import org.springframework.stereotype.Component;
 @Component
 public class FilePolicy {
   private final DbService db;
+  private final PermissionService permissions;
   private final JdbcTemplate jdbc;
 
-  public FilePolicy(DbService db) {
+  public FilePolicy(DbService db, PermissionService permissions) {
     this.db = db;
+    this.permissions = permissions;
     this.jdbc = db.jdbc();
   }
 
@@ -23,6 +26,7 @@ public class FilePolicy {
     }
     return SecurityUtils.currentUserId().map(userId -> {
       if (db.isAdmin()) return true;
+      if (canViewAsPrivilegedAdmin(file)) return true;
       Object ownerId = file.get("ownerId");
       if (ownerId != null && userId.equals(UUID.fromString(ownerId.toString()))) return true;
       UUID fileId = UUID.fromString(file.get("id").toString());
@@ -66,6 +70,15 @@ public class FilePolicy {
         default -> false;
       };
     }).orElse(false);
+  }
+
+  private boolean canViewAsPrivilegedAdmin(Map<String, Object> file) {
+    if (permissions.has("files.view_private")) return true;
+    String entityType = file.get("entityType") == null ? "" : file.get("entityType").toString();
+    String purpose = file.get("purpose") == null ? "" : file.get("purpose").toString();
+    if ("verification".equals(entityType) && permissions.has("files.view_verification")) return true;
+    return ("tutor_document".equals(entityType) || "tutor_document".equals(purpose))
+        && permissions.has("files.view_tutor_document");
   }
 
   private boolean exists(String sql, Object... args) {

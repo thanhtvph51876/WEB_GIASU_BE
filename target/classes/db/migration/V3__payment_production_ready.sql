@@ -98,9 +98,9 @@ create table if not exists receipts (
 );
 
 insert into system_settings (key, value, description) values
-  ('paymentMode', '"mock"'::jsonb, 'mock | sandbox | production'),
-  ('enabledGateways', '["mock","bank_qr","vnpay","momo","payos","stripe"]'::jsonb, 'Danh sach gateway thanh toan duoc bat'),
-  ('defaultGateway', '"mock"'::jsonb, 'Gateway mac dinh'),
+  ('paymentMode', '"sandbox"'::jsonb, 'sandbox | production'),
+  ('enabledGateways', '["bank_qr","vnpay","momo","payos","stripe"]'::jsonb, 'Danh sach gateway thanh toan duoc bat'),
+  ('defaultGateway', '"bank_qr"'::jsonb, 'Gateway mac dinh'),
   ('paymentTimeoutMinutes', '30'::jsonb, 'Thoi gian het han checkout'),
   ('refundPolicy', '"Hoan tien theo chinh sach dich vu va trang thai buoi hoc."'::jsonb, 'Chinh sach hoan tien'),
   ('invoicePrefix', '"INV"'::jsonb, 'Tien to hoa don'),

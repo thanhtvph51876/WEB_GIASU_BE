@@ -3,6 +3,7 @@ package com.example.tutorplatform.payment;
 import com.example.tutorplatform.common.BusinessException;
 import com.example.tutorplatform.common.ForbiddenException;
 import com.example.tutorplatform.db.DbService;
+import com.example.tutorplatform.finance.EarningLedgerService;
 import com.example.tutorplatform.payment.gateway.PaymentGateway;
 import com.example.tutorplatform.payment.gateway.PaymentGatewayFactory;
 import com.example.tutorplatform.payment.gateway.dto.CreateCheckoutRequest;
@@ -10,6 +11,7 @@ import com.example.tutorplatform.payment.gateway.dto.CreateCheckoutResponse;
 import com.example.tutorplatform.payment.gateway.dto.GatewayPaymentStatus;
 import com.example.tutorplatform.payment.gateway.dto.VerifyWebhookRequest;
 import com.example.tutorplatform.payment.gateway.dto.VerifyWebhookResponse;
+import com.example.tutorplatform.security.PermissionService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -34,12 +36,16 @@ public class PaymentService {
   private final DbService db;
   private final JdbcTemplate jdbc;
   private final PaymentGatewayFactory gatewayFactory;
+  private final EarningLedgerService ledgerService;
+  private final PermissionService permissions;
   private final ObjectMapper objectMapper = new ObjectMapper();
 
-  public PaymentService(DbService db, PaymentGatewayFactory gatewayFactory) {
+  public PaymentService(DbService db, PaymentGatewayFactory gatewayFactory, EarningLedgerService ledgerService, PermissionService permissions) {
     this.db = db;
     this.jdbc = db.jdbc();
     this.gatewayFactory = gatewayFactory;
+    this.ledgerService = ledgerService;
+    this.permissions = permissions;
   }
 
   public Map<String, Object> settings() {
@@ -143,7 +149,7 @@ public class PaymentService {
 
   @Transactional
   public Map<String, Object> adminMarkPaid(UUID paymentId, String reason) {
-    requireAdmin();
+    permissions.require("payments.mark_paid");
     if (reason == null || reason.isBlank()) {
       throw new BusinessException("REASON_REQUIRED", "Cần nhập lý do ghi nhận thanh toán thủ công.");
     }
@@ -155,7 +161,7 @@ public class PaymentService {
 
   @Transactional
   public Map<String, Object> adminMarkFailed(UUID paymentId) {
-    requireAdmin();
+    permissions.require("payments.mark_failed");
     markPaymentTerminal(paymentId, "failed", "Thanh toán thất bại", "Thanh toán của bạn chưa thành công. Vui lòng thử lại hoặc liên hệ hỗ trợ.");
     db.auditCurrent("admin.payment_mark_failed", "payment", paymentId, "Admin ghi nhận thanh toán thất bại.");
     return paymentById(paymentId);
@@ -163,7 +169,7 @@ public class PaymentService {
 
   @Transactional
   public Map<String, Object> refund(UUID paymentId, Map<String, Object> body) {
-    requireAdmin();
+    permissions.require("payments.refund");
     Map<String, Object> payment = paymentByIdForUpdate(paymentId);
     int amount = body.get("amount") == null ? number(payment.get("amount")) : number(body.get("amount"));
     String reason = valueOr(string(body, "reason"), "Hoàn tiền theo yêu cầu vận hành.");
@@ -186,8 +192,8 @@ public class PaymentService {
         values (?, ?, ?, 'succeeded', ?, ?, ?)
         """, paymentId, amount, reason, gatewayRefundId, db.currentUserIdOrThrow(), db.currentUserIdOrThrow());
     jdbc.update("update payments set status = ?, updated_at = now() where id = ?", nextStatus, paymentId);
+    applyRefundToEarnings(payment, amount, "refunded".equals(nextStatus), reason);
     if ("refunded".equals(nextStatus)) {
-      jdbc.update("update tutor_earnings set status = 'cancelled', updated_at = now() where payment_id = ?", paymentId);
       jdbc.update("update payment_transactions set status = 'refunded', updated_at = now() where payment_id = ? and status = 'success'", paymentId);
     }
     db.notify(UUID.fromString(payment.get("userId").toString()), "warning", "Thanh toán đã được hoàn tiền", "Giao dịch đã được cập nhật trạng thái hoàn tiền.", "/dashboard/student/payments", "payment", paymentId);
@@ -254,17 +260,17 @@ public class PaymentService {
   }
 
   public List<Map<String, Object>> transactions() {
-    requireAdmin();
+    permissions.require("payments.read");
     return jdbc.query("select * from payment_transactions order by created_at desc limit 500", transactionMapper());
   }
 
   public List<Map<String, Object>> webhookEvents() {
-    requireAdmin();
+    permissions.require("payments.read");
     return jdbc.query("select * from payment_webhook_events order by received_at desc limit 500", webhookEventMapper());
   }
 
   public List<Map<String, Object>> refunds() {
-    requireAdmin();
+    permissions.require("payments.read");
     return jdbc.query("select * from payment_refunds order by created_at desc limit 500", refundMapper());
   }
 
@@ -314,18 +320,32 @@ public class PaymentService {
   }
 
   private void makeEarningAvailable(UUID paymentId) {
-    int updated = jdbc.update("update tutor_earnings set status = 'available', updated_at = now() where payment_id = ? and status in ('pending','cancelled')", paymentId);
-    if (updated > 0) return;
+    List<Map<String, Object>> locked = earningsForPayment(paymentId, true);
+    List<Map<String, Object>> pending = locked.stream()
+        .filter(row -> List.of("pending", "cancelled").contains(value(row.get("status"))))
+        .toList();
+    for (Map<String, Object> earning : pending) {
+      UUID earningId = UUID.fromString(earning.get("id").toString());
+      jdbc.update("update tutor_earnings set status = 'available', updated_at = now() where id = ?", earningId);
+      ledgerService.record(earningId, uuidOrNull(earning.get("tutorId")), uuidOrNull(earning.get("paymentId")), null,
+          "earning_available", 0, "Thanh toán đã hoàn tất, earning khả dụng.");
+    }
+    if (!pending.isEmpty()) return;
     Map<String, Object> payment = paymentById(paymentId);
     if (payment.get("tutorId") == null) return;
     UUID tutorId = UUID.fromString(payment.get("tutorId").toString());
     int amount = number(payment.get("amount"));
     int fee = db.commissionFee(amount);
     if (!exists("select 1 from tutor_earnings where payment_id = ?", paymentId)) {
-      jdbc.update("""
+      UUID earningId = jdbc.queryForObject("""
           insert into tutor_earnings(tutor_id, session_id, payment_id, gross_amount, platform_fee, net_amount, status)
           values (?, ?, ?, ?, ?, ?, 'available')
-          """, tutorId, uuidOrNull(payment.get("sessionId")), paymentId, amount, fee, Math.max(0, amount - fee));
+          returning id
+          """, UUID.class, tutorId, uuidOrNull(payment.get("sessionId")), paymentId, amount, fee, Math.max(0, amount - fee));
+      ledgerService.record(earningId, tutorId, paymentId, null, "earning_created", Math.max(0, amount - fee),
+          "Earning được tạo từ thanh toán thành công.");
+      ledgerService.record(earningId, tutorId, paymentId, null, "earning_available", 0,
+          "Thanh toán đã hoàn tất, earning khả dụng.");
     }
   }
 
@@ -357,9 +377,53 @@ public class PaymentService {
         values (?, ?, ?, 'succeeded', ?)
         """, paymentId, amount <= 0 ? number(payment.get("amount")) : amount, reason, "gateway-refund-" + paymentId);
     jdbc.update("update payments set status = 'refunded', updated_at = now() where id = ?", paymentId);
-    jdbc.update("update tutor_earnings set status = 'cancelled', updated_at = now() where payment_id = ?", paymentId);
+    applyRefundToEarnings(payment, amount <= 0 ? number(payment.get("amount")) : amount, true, reason);
     jdbc.update("update payment_transactions set status = 'refunded', updated_at = now() where payment_id = ? and status = 'success'", paymentId);
     db.notify(UUID.fromString(payment.get("userId").toString()), "warning", "Thanh toán đã được hoàn tiền", "Gateway đã xác nhận hoàn tiền giao dịch.", "/dashboard/student/payments", "payment", paymentId);
+  }
+
+  private void applyRefundToEarnings(Map<String, Object> payment, int refundAmount, boolean fullRefund, String reason) {
+    UUID paymentId = UUID.fromString(payment.get("id").toString());
+    int paymentAmount = Math.max(1, number(payment.get("amount")));
+    for (Map<String, Object> earning : earningsForPayment(paymentId, true)) {
+      UUID earningId = UUID.fromString(earning.get("id").toString());
+      UUID tutorId = uuidOrNull(earning.get("tutorId"));
+      int netAmount = number(earning.get("netAmount"));
+      int reversal = fullRefund ? netAmount : Math.min(netAmount, (int) Math.round(netAmount * (refundAmount / (double) paymentAmount)));
+      if (reversal <= 0) continue;
+      String status = value(earning.get("status"));
+      if (List.of("pending", "available", "cancelled").contains(status)) {
+        if (!"cancelled".equals(status) && fullRefund) {
+          jdbc.update("update tutor_earnings set status = 'cancelled', updated_at = now() where id = ?", earningId);
+        }
+        ledgerService.record(earningId, tutorId, paymentId, null, "refund_reversal", -reversal,
+            "Hoàn tiền làm giảm earning chưa payout. Lý do: " + reason);
+      } else {
+        ledgerService.record(earningId, tutorId, paymentId, null, "refund_debt", -reversal,
+            "Hoàn tiền sau khi earning đã bị lock/paid, ghi nhận khoản âm cần đối soát. Lý do: " + reason);
+      }
+    }
+  }
+
+  private List<Map<String, Object>> earningsForPayment(UUID paymentId, boolean forUpdate) {
+    String lock = forUpdate ? " for update" : "";
+    return jdbc.query("""
+        select id, tutor_id, session_id, payment_id, gross_amount, platform_fee, net_amount, status
+        from tutor_earnings
+        where payment_id = ?
+        order by created_at, id
+        """ + lock, (rs, row) -> {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", str(rs, "id"));
+      m.put("tutorId", str(rs, "tutor_id"));
+      m.put("sessionId", str(rs, "session_id"));
+      m.put("paymentId", str(rs, "payment_id"));
+      m.put("grossAmount", rs.getInt("gross_amount"));
+      m.put("platformFee", rs.getInt("platform_fee"));
+      m.put("netAmount", rs.getInt("net_amount"));
+      m.put("status", rs.getString("status"));
+      return m;
+    }, paymentId);
   }
 
   private void ensureInvoice(UUID paymentId) {
@@ -486,10 +550,6 @@ public class PaymentService {
     if (!db.currentUserIdOrThrow().equals(userId)) {
       throw new ForbiddenException("Bạn không có quyền xem hoặc xử lý thanh toán này.");
     }
-  }
-
-  private void requireAdmin() {
-    if (!db.isAdmin()) throw new ForbiddenException("Bạn cần quyền admin để thực hiện thao tác này.");
   }
 
   private boolean exists(String sql, Object... args) {

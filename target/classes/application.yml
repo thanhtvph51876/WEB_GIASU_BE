@@ -5,9 +5,10 @@ spring:
   application:
     name: tutor-platform
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/tutor_platform?options=-c%20TimeZone=Asia/Ho_Chi_Minh}
-    username: ${SPRING_DATASOURCE_USERNAME:thanhvan1509}
-    password: ${SPRING_DATASOURCE_PASSWORD:thanhvan1509}
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:tutor_platform}?TimeZone=Asia/Ho_Chi_Minh}
+    username: ${SPRING_DATASOURCE_USERNAME:${DB_USER}}
+    password: ${SPRING_DATASOURCE_PASSWORD:${DB_PASSWORD}}
+    driver-class-name: org.postgresql.Driver
   jpa:
     open-in-view: false
     hibernate:
@@ -27,20 +28,33 @@ springdoc:
     path: /swagger-ui/index.html
 
 app:
+  env: ${APP_ENV:${SPRING_PROFILES_ACTIVE:local}}
   jwt:
-    secret: ${JWT_SECRET:change-me-to-a-long-random-secret-at-least-32-bytes}
-    access-token-expire-minutes: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:60}
-    refresh-token-expire-days: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS:7}
+    secret: ${JWT_SECRET}
+    access-token-expire-minutes: ${JWT_ACCESS_TTL:${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:60}}
+    refresh-token-expire-days: ${JWT_REFRESH_TTL:${JWT_REFRESH_TOKEN_EXPIRE_DAYS:7}}
   cors:
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+    allowed-origins:
+      - ${CORS_ALLOWED_ORIGINS_1:http://localhost:3000}
+      - ${CORS_ALLOWED_ORIGINS_2:http://localhost:5173}
+      - ${CORS_ALLOWED_ORIGINS_3:https://giase-web-gv6y.vercel.app}
   upload:
     dir: ${UPLOAD_DIR:uploads}
-    public-base-url: ${UPLOAD_PUBLIC_BASE_URL:http://localhost:8080/api/v1/files}
+    public-base-url: ${FILE_BASE_URL:${UPLOAD_PUBLIC_BASE_URL:http://localhost:8080/api/v1/files}}
+    storage-provider: ${STORAGE_PROVIDER:local}
   payment:
-    mode: ${PAYMENT_MODE:mock}
+    provider: ${PAYMENT_PROVIDER:${PAYMENT_MODE:mock}}
+    mode: ${PAYMENT_MODE:${PAYMENT_PROVIDER:mock}}
     enabled-gateways: ${ENABLED_GATEWAYS:mock,bank_qr,vnpay,momo,payos,stripe}
     default-gateway: ${DEFAULT_GATEWAY:mock}
     timeout-minutes: ${PAYMENT_TIMEOUT_MINUTES:30}
+  verification:
+    provider: ${VERIFICATION_PROVIDER:mock}
   seed:
-    enabled: ${SEED_DATA_ENABLED:true}
+    enabled: ${SEED_DATA_ENABLED:false}
+  auth:
+    frontend-base-url: ${FRONTEND_BASE_URL:http://localhost:3000}
+    password-reset-token-expire-minutes: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:30}
+    email-verification-token-expire-minutes: ${EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES:1440}
+    expose-dev-tokens: ${AUTH_EXPOSE_DEV_TOKENS:false}
   commission-rate: ${COMMISSION_RATE:0.15}

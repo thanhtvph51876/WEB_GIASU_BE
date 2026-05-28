@@ -167,7 +167,7 @@ public class DbService {
       m.put("faculty", valueOr(rs.getString("education"), ""));
       m.put("education", rs.getString("education"));
       m.put("major", valueOr(rs.getString("major"), ""));
-      m.put("studentCode", "");
+      m.put("studentCode", hasColumn(rs, "student_code") ? valueOr(rs.getString("student_code"), "") : "");
       m.put("subjects", listStrings("select s.name from tutor_subjects ts join subjects s on s.id = ts.subject_id where ts.tutor_id = ? order by s.name", id));
       m.put("grades", listStrings("select distinct gl.name from tutor_subjects ts join grade_levels gl on gl.id = ts.grade_level_id where ts.tutor_id = ? order by gl.name", id));
       m.put("experienceYears", rs.getInt("experience_years"));
@@ -203,6 +203,7 @@ public class DbService {
       Map<String, Object> m = base(rs);
       m.put("requestCode", rs.getString("request_code"));
       m.put("userId", str(rs, "requester_id"));
+      m.put("studentProfileId", str(rs, "student_profile_id"));
       m.put("studentName", rs.getString("student_name"));
       m.put("parentName", rs.getString("parent_name"));
       m.put("phone", rs.getString("phone"));

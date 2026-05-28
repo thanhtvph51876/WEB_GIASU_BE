@@ -5,9 +5,10 @@ spring:
   application:
     name: tutor-platform
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/tutor_platform}
-    username: ${SPRING_DATASOURCE_USERNAME:postgres}
-    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:tutor_platform}?TimeZone=Asia/Ho_Chi_Minh}
+    username: ${SPRING_DATASOURCE_USERNAME:${DB_USER}}
+    password: ${SPRING_DATASOURCE_PASSWORD:${DB_PASSWORD}}
+    driver-class-name: org.postgresql.Driver
   jpa:
     open-in-view: false
     hibernate:
@@ -27,10 +28,11 @@ springdoc:
     path: /swagger-ui/index.html
 
 app:
+  env: ${APP_ENV:${SPRING_PROFILES_ACTIVE:local}}
   jwt:
-    secret: ${JWT_SECRET:change-me-to-a-long-random-secret-at-least-32-bytes}
-    access-token-expire-minutes: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:60}
-    refresh-token-expire-days: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS:7}
+    secret: ${JWT_SECRET}
+    access-token-expire-minutes: ${JWT_ACCESS_TTL:${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:60}}
+    refresh-token-expire-days: ${JWT_REFRESH_TTL:${JWT_REFRESH_TOKEN_EXPIRE_DAYS:7}}
   cors:
     allowed-origins:
       - ${CORS_ALLOWED_ORIGINS_1:http://localhost:3000}
@@ -38,12 +40,16 @@ app:
       - ${CORS_ALLOWED_ORIGINS_3:https://giase-web-gv6y.vercel.app}
   upload:
     dir: ${UPLOAD_DIR:uploads}
-    public-base-url: ${UPLOAD_PUBLIC_BASE_URL:http://localhost:8080/api/v1/files}
+    public-base-url: ${FILE_BASE_URL:${UPLOAD_PUBLIC_BASE_URL:http://localhost:8080/api/v1/files}}
+    storage-provider: ${STORAGE_PROVIDER:local}
   payment:
-    mode: ${PAYMENT_MODE:mock}
+    provider: ${PAYMENT_PROVIDER:${PAYMENT_MODE:mock}}
+    mode: ${PAYMENT_MODE:${PAYMENT_PROVIDER:mock}}
     enabled-gateways: ${ENABLED_GATEWAYS:mock,bank_qr,vnpay,momo,payos,stripe}
     default-gateway: ${DEFAULT_GATEWAY:mock}
     timeout-minutes: ${PAYMENT_TIMEOUT_MINUTES:30}
+  verification:
+    provider: ${VERIFICATION_PROVIDER:mock}
   seed:
     enabled: ${SEED_DATA_ENABLED:false}
   auth:
