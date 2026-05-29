@@ -57,7 +57,7 @@ public class FileStorageService {
       normalizedVisibility = "private";
     }
     String sha256 = sha256(bytes);
-    boolean duplicate = duplicateSensitiveFile(sha256, normalizedPurpose);
+    boolean duplicate = duplicateSensitiveFile(sha256, normalizedPurpose, ownerId);
     int riskScore = duplicate ? 70 : 0;
 
     String storedName = UUID.randomUUID() + extension;
@@ -109,14 +109,16 @@ public class FileStorageService {
     return result;
   }
 
-  private boolean duplicateSensitiveFile(String sha256, String purpose) {
+  private boolean duplicateSensitiveFile(String sha256, String purpose, UUID ownerId) {
     if (sha256 == null || sha256.isBlank()) return false;
     boolean sensitive = SENSITIVE_PURPOSES.contains(purpose);
     if (!sensitive) return false;
     Integer count = jdbc.queryForObject("""
         select count(*) from uploaded_files
-        where sha256_hash = ? and purpose in ('student_card','student_selfie','tutor_identity','tutor_certificate','tutor_document')
-        """, Integer.class, sha256);
+        where sha256_hash = ?
+          and owner_id <> ?
+          and purpose in ('student_card','student_selfie','tutor_identity','tutor_certificate','tutor_document')
+        """, Integer.class, sha256, ownerId);
     return count != null && count > 0;
   }
 

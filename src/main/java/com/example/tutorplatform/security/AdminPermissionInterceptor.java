@@ -46,12 +46,16 @@ public class AdminPermissionInterceptor implements HandlerInterceptor {
     if (path.startsWith(ADMIN_PREFIX + "/payouts/") && path.endsWith("/reject")) return "payouts.reject";
     if (path.equals(ADMIN_PREFIX + "/payouts") || path.startsWith(ADMIN_PREFIX + "/payouts/")) return "payouts.read";
 
+    if (path.startsWith(ADMIN_PREFIX + "/verifications/") && path.endsWith("/approve")) return "verifications.approve_document";
     if (path.startsWith(ADMIN_PREFIX + "/verifications/") && !read) return "verifications.review";
     if (path.equals(ADMIN_PREFIX + "/verifications") || path.startsWith(ADMIN_PREFIX + "/verifications/")) return "verifications.read";
 
     if (path.startsWith(ADMIN_PREFIX + "/tutor-documents/")) return "tutor_documents.review";
     if (path.startsWith(ADMIN_PREFIX + "/tutors/") && (path.endsWith("/suspend") || path.endsWith("/reactivate"))) return "tutors.suspend";
-    if (path.startsWith(ADMIN_PREFIX + "/tutors/") && !read) return "tutors.approve";
+    if (path.startsWith(ADMIN_PREFIX + "/tutors/") && path.endsWith("/approve")) return "tutors.approve";
+    if (path.startsWith(ADMIN_PREFIX + "/tutors/") && path.endsWith("/reject")) return "tutors.reject";
+    if (path.startsWith(ADMIN_PREFIX + "/tutors/") && path.endsWith("/request-update")) return "tutors.request_more_documents";
+    if (path.startsWith(ADMIN_PREFIX + "/tutors/") && !read) return "tutors.manage";
     if (path.equals(ADMIN_PREFIX + "/tutors") || path.startsWith(ADMIN_PREFIX + "/tutors/")) return "tutors.read";
 
     if (path.equals(ADMIN_PREFIX + "/users")

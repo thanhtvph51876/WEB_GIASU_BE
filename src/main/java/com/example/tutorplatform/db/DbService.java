@@ -3,6 +3,7 @@ package com.example.tutorplatform.db;
 import com.example.tutorplatform.common.ForbiddenException;
 import com.example.tutorplatform.common.NotFoundException;
 import com.example.tutorplatform.security.SecurityUtils;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDate;
@@ -22,9 +23,11 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class DbService {
   private final JdbcTemplate jdbc;
+  private final ObjectMapper objectMapper;
 
-  public DbService(JdbcTemplate jdbc) {
+  public DbService(JdbcTemplate jdbc, ObjectMapper objectMapper) {
     this.jdbc = jdbc;
+    this.objectMapper = objectMapper;
   }
 
   public JdbcTemplate jdbc() {
@@ -587,15 +590,32 @@ public class DbService {
   }
 
   public void audit(UUID actorId, String actorRole, String action, String entityType, UUID entityId, String description) {
+    audit(actorId, actorRole, action, entityType, entityId, description, Map.of());
+  }
+
+  public void audit(UUID actorId, String actorRole, String action, String entityType, UUID entityId, String description, Object metadata) {
     jdbc.update("""
         insert into audit_logs(actor_id, actor_role, action, entity_type, entity_id, description, metadata)
-        values (?, ?, ?, ?, ?, ?, '{}'::jsonb)
-        """, actorId, actorRole, action, entityType, entityId, description);
+        values (?, ?, ?, ?, ?, ?, ?::jsonb)
+        """, actorId, actorRole, action, entityType, entityId, description, toJson(metadata));
   }
 
   public void auditCurrent(String action, String entityType, UUID entityId, String description) {
     Map<String, Object> user = currentUserOrThrow();
     audit(UUID.fromString(user.get("id").toString()), user.get("role").toString(), action, entityType, entityId, description);
+  }
+
+  public void auditCurrent(String action, String entityType, UUID entityId, String description, Object metadata) {
+    Map<String, Object> user = currentUserOrThrow();
+    audit(UUID.fromString(user.get("id").toString()), user.get("role").toString(), action, entityType, entityId, description, metadata);
+  }
+
+  private String toJson(Object value) {
+    try {
+      return objectMapper.writeValueAsString(value == null ? Map.of() : value);
+    } catch (Exception ex) {
+      return "{}";
+    }
   }
 
   @Transactional

@@ -8,12 +8,9 @@ import com.example.tutorplatform.db.DbService;
 import com.example.tutorplatform.file.FileStorageService;
 import com.example.tutorplatform.file.FileStorageService.StoredFile;
 import jakarta.servlet.http.HttpServletRequest;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,16 +31,6 @@ import org.springframework.web.multipart.MultipartFile;
 @RestController
 @RequestMapping("/api/v1")
 public class VerificationController {
-  private static final String AGREEMENT_VERSION = "student-tutor-verification-v1";
-  private static final String AGREEMENT_TITLE = "Bản cam kết xác thực thông tin";
-  private static final String AGREEMENT_CONTENT = """
-      Tôi xác nhận thông tin và giấy tờ cung cấp là đúng sự thật.
-      Tôi là chủ sở hữu hợp pháp của giấy tờ đã tải lên.
-      Tôi đồng ý để nền tảng xử lý dữ liệu phục vụ xác thực tài khoản.
-      Tôi hiểu rằng nếu giả mạo, tài khoản có thể bị từ chối, bị khóa hoặc bị hủy quyền sử dụng.
-      Tôi đồng ý với điều khoản sử dụng và chính sách dữ liệu của nền tảng.
-      """;
-
   private final DbService db;
   private final JdbcTemplate jdbc;
   private final FileStorageService fileStorage;
@@ -78,7 +65,7 @@ public class VerificationController {
     requireStudent();
     UUID userId = db.currentUserIdOrThrow();
     StoredFile stored = fileStorage.store(file, userId, "private", "student_card");
-    boolean duplicate = duplicateDocumentService.hasDuplicate(stored.sha256Hash());
+    boolean duplicate = duplicateDocumentService.hasDuplicateForDifferentOwner(stored.sha256Hash(), userId);
     int riskScore = fraudRiskService.score(duplicate, schoolEmail, studentCode);
     UUID id = jdbc.queryForObject("""
         insert into user_verifications(user_id, verification_type, school_name, student_code, full_name_input,
@@ -139,7 +126,7 @@ public class VerificationController {
     String type = normalizeTutorType(verificationType);
     UUID userId = db.currentUserIdOrThrow();
     StoredFile stored = fileStorage.store(file, userId, "private", type);
-    boolean duplicate = duplicateDocumentService.hasDuplicate(stored.sha256Hash());
+    boolean duplicate = duplicateDocumentService.hasDuplicateForDifferentOwner(stored.sha256Hash(), userId);
     int riskScore = fraudRiskService.score(duplicate, schoolEmail, studentCode);
     UUID id = jdbc.queryForObject("""
         insert into user_verifications(user_id, verification_type, school_name, student_code, full_name_input,
@@ -149,8 +136,21 @@ public class VerificationController {
         """, UUID.class, userId, type, schoolName, studentCode, fullNameInput, schoolEmail, stored.id(), duplicate, riskScore);
     fileStorage.attachEntity(stored.id(), "verification", id, "private");
     ocrService.extractDocumentFields(stored.id().toString());
-    db.auditCurrent("verification.tutor_document_upload", "verification", id, "Gia sư tải giấy tờ xác thực.");
+    resetTutorStatusAfterVerificationUpload(userId, id);
+    db.auditCurrent("verification.tutor_document_upload", "verification", id, "Gia sư tải giấy tờ xác thực.",
+        Map.of("verificationType", type, "duplicateFile", duplicate, "riskScore", riskScore));
     return ApiResponse.ok(verificationById(id), "Đã tải giấy tờ. Vui lòng ký bản cam kết để gửi xét duyệt.");
+  }
+
+  @GetMapping("/verification/terms/tutor")
+  public ApiResponse<Map<String, Object>> tutorVerificationTerms() {
+    return ApiResponse.ok(Map.of(
+        "version", VerificationTerms.VERSION,
+        "effectiveDate", VerificationTerms.EFFECTIVE_DATE,
+        "title", VerificationTerms.TITLE,
+        "content", VerificationTerms.CONTENT,
+        "contentHash", VerificationTerms.CONTENT_HASH
+    ));
   }
 
   @GetMapping("/tutor/verifications/me")
@@ -239,8 +239,9 @@ public class VerificationController {
             ip_address = excluded.ip_address,
             user_agent = excluded.user_agent,
             signed_at = now()
-        """, db.currentUserIdOrThrow(), verificationId, AGREEMENT_VERSION, AGREEMENT_TITLE,
-        AGREEMENT_CONTENT, AGREEMENT_CONTENT, sha256(AGREEMENT_CONTENT), uploadedHash, signer, signerEmail, ip(request), request.getHeader("User-Agent"));
+        """, db.currentUserIdOrThrow(), verificationId, VerificationTerms.VERSION, VerificationTerms.TITLE,
+        VerificationTerms.CONTENT, VerificationTerms.CONTENT, VerificationTerms.CONTENT_HASH, uploadedHash, signer, signerEmail, ip(request), request.getHeader("User-Agent"));
+    upsertTutorCommitmentIfNeeded(verification, signer, firstString(body, "identityNumberMasked"), request);
     if (!List.of("approved", "pending_review").contains(verification.get("status"))) {
       jdbc.update("""
           update user_verifications
@@ -249,7 +250,8 @@ public class VerificationController {
           """, verificationId);
       db.notifyAdmins("info", "Xác thực chờ duyệt", "Có hồ sơ xác thực mới cần kiểm tra.", "/admin/verifications", "verification", verificationId);
     }
-    db.auditCurrent("verification.agreement_sign", "verification", verificationId, "Người dùng ký bản cam kết xác thực thông tin.");
+    db.auditCurrent("verification.agreement_sign", "verification", verificationId, "Người dùng ký bản cam kết xác thực thông tin.",
+        Map.of("agreementVersion", VerificationTerms.VERSION, "agreementContentHash", VerificationTerms.CONTENT_HASH));
     return verificationById(verificationId);
   }
 
@@ -280,6 +282,7 @@ public class VerificationController {
     if ("approved".equals(status) && Boolean.TRUE.equals(verification.get("duplicateFile"))) {
       throw new BusinessException("DUPLICATE_REVIEW_REQUIRED", "File bị trùng, cần kiểm tra thủ công trước khi duyệt.");
     }
+    String oldStatus = String.valueOf(verification.get("status"));
     jdbc.update("""
         update user_verifications
         set status = ?, reject_reason = ?, reviewed_by = ?, reviewed_at = now(), updated_at = now()
@@ -293,8 +296,51 @@ public class VerificationController {
     };
     db.notify(userId, "approved".equals(status) ? "success" : "warning", title,
         reason == null ? title : reason, "/profile", "verification", verificationId);
-    db.auditCurrent("admin.verification_" + status, "verification", verificationId, "Admin cập nhật xác thực thành " + status + ".");
+    db.auditCurrent("admin.verification_" + status, "verification", verificationId, "Admin cập nhật xác thực thành " + status + ".",
+        Map.of("oldStatus", oldStatus, "newStatus", status, "reason", reason == null ? "" : reason));
     return verificationById(verificationId);
+  }
+
+  private void resetTutorStatusAfterVerificationUpload(UUID userId, UUID verificationId) {
+    db.tutorIdByUser(userId).ifPresent(tutorId -> {
+      String oldStatus = jdbc.queryForObject("select status from tutor_profiles where id = ?", String.class, tutorId);
+      if (List.of("approved", "verified").contains(oldStatus)) {
+        jdbc.update("""
+            update tutor_profiles
+            set status = 'pending_verification',
+                status_reason = 'Gia sư đã tải lại giấy tờ, cần xác thực lại trước khi duyệt.',
+                approved_at = null,
+                approved_by = null,
+                updated_at = now()
+            where id = ?
+            """, tutorId);
+        db.notifyAdmins("warning", "Gia sư cần xác thực lại", "Gia sư đã tải lại giấy tờ sau khi được duyệt.", "/admin/verifications", "tutor", tutorId);
+        db.auditCurrent("verification.document_reuploaded_after_approval", "tutor", tutorId,
+            "Gia sư tải lại giấy tờ sau khi hồ sơ đã được duyệt, trạng thái được đưa về chờ xác thực.",
+            Map.of("verificationId", verificationId.toString(), "oldStatus", oldStatus, "newStatus", "pending_verification"));
+      }
+    });
+  }
+
+  private void upsertTutorCommitmentIfNeeded(Map<String, Object> verification, String signer, String identityNumberMasked, HttpServletRequest request) {
+    String type = String.valueOf(verification.get("verificationType"));
+    if (!type.startsWith("tutor_")) return;
+    UUID userId = UUID.fromString(verification.get("userId").toString());
+    UUID tutorId = db.tutorIdByUser(userId).orElse(null);
+    if (tutorId == null) return;
+    jdbc.update("""
+        insert into tutor_commitments(tutor_id, commitment_version, accepted_terms_hash, full_name_at_signing,
+          identity_number_masked, signed_ip, signed_user_agent, status)
+        values (?, ?, ?, ?, ?, ?, ?, 'signed')
+        on conflict (tutor_id, commitment_version) where status = 'signed'
+        do update set accepted_terms_hash = excluded.accepted_terms_hash,
+          full_name_at_signing = excluded.full_name_at_signing,
+          identity_number_masked = excluded.identity_number_masked,
+          signed_ip = excluded.signed_ip,
+          signed_user_agent = excluded.signed_user_agent,
+          signed_at = now()
+        """, tutorId, VerificationTerms.VERSION, VerificationTerms.CONTENT_HASH, signer,
+        identityNumberMasked, ip(request), request.getHeader("User-Agent"));
   }
 
   private List<Map<String, Object>> verificationsForUser(UUID userId) {
@@ -432,11 +478,4 @@ public class VerificationController {
     return request.getRemoteAddr();
   }
 
-  private String sha256(String value) {
-    try {
-      return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
-    } catch (Exception ex) {
-      throw new IllegalStateException("Cannot hash agreement", ex);
-    }
-  }
 }

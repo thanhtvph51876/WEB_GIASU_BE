@@ -14,7 +14,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 public class GlobalExceptionHandler {
   @ExceptionHandler(BusinessException.class)
   public ResponseEntity<ApiResponse<Void>> business(BusinessException ex) {
-    return ResponseEntity.status(ex.status()).body(ApiResponse.error(ex.code(), ex.getMessage(), null));
+    return ResponseEntity.status(ex.status()).body(ApiResponse.error(ex.code(), ex.getMessage(), ex.details()));
   }
 
   @ExceptionHandler({AccessDeniedException.class})

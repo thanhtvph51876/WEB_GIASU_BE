@@ -65,14 +65,18 @@ public class StatusTransitionPolicy {
       "processing", Set.of("paid", "completed", "rejected")
   );
 
-  private static final Map<String, Set<String>> TUTOR = Map.of(
-      "draft", Set.of("pending"),
-      "pending", Set.of("approved", "rejected", "need_update"),
-      "need_update", Set.of("pending", "rejected"),
-      "rejected", Set.of("pending"),
-      "approved", Set.of("suspended", "inactive"),
-      "suspended", Set.of("approved", "inactive"),
-      "inactive", Set.of("approved")
+  private static final Map<String, Set<String>> TUTOR = Map.ofEntries(
+      Map.entry("draft", Set.of("submitted", "pending", "pending_verification")),
+      Map.entry("submitted", Set.of("pending_verification", "needs_more_documents", "verified", "approved", "rejected")),
+      Map.entry("pending", Set.of("pending_verification", "needs_more_documents", "verified", "approved", "rejected", "need_update")),
+      Map.entry("pending_verification", Set.of("needs_more_documents", "verified", "approved", "rejected", "need_update")),
+      Map.entry("need_update", Set.of("pending", "pending_verification", "rejected")),
+      Map.entry("needs_more_documents", Set.of("pending_verification", "rejected")),
+      Map.entry("verified", Set.of("approved", "rejected", "pending_verification")),
+      Map.entry("rejected", Set.of("pending")),
+      Map.entry("approved", Set.of("pending_verification", "suspended", "inactive")),
+      Map.entry("suspended", Set.of("approved", "inactive")),
+      Map.entry("inactive", Set.of("approved"))
   );
 
   public void requireLearningRequest(String current, String next) {

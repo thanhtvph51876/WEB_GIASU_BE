@@ -20,7 +20,7 @@ public class AdminReportService {
     return Map.of(
         "totalUsers", count("users"),
         "totalTutors", count("tutor_profiles"),
-        "pendingTutors", countWhere("tutor_profiles", "status = 'pending'"),
+        "pendingTutors", countWhere("tutor_profiles", "status in ('submitted','pending','pending_verification','needs_more_documents','need_update','verified')"),
         "totalStudents", jdbc.queryForObject("select count(*) from users where role in ('student','parent')", Integer.class),
         "newRequests", countWhere("learning_requests", "status = 'new'"),
         "activeClasses", countWhere("tutoring_classes", "status = 'active'"),

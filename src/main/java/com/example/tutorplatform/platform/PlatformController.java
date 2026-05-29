@@ -19,6 +19,7 @@ import com.example.tutorplatform.message.ConversationService;
 import com.example.tutorplatform.notification.NotificationService;
 import com.example.tutorplatform.policy.StatusTransitionPolicy;
 import com.example.tutorplatform.tutoringclass.ClassSessionService;
+import com.example.tutorplatform.verification.TutorApprovalEligibilityService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import java.io.IOException;
@@ -29,6 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
@@ -61,6 +63,7 @@ public class PlatformController {
   private final FinanceService financeService;
   private final BookingWorkflowService bookingWorkflowService;
   private final ClassSessionService classSessionService;
+  private final TutorApprovalEligibilityService tutorApprovalEligibilityService;
 
   public PlatformController(DbService db, RefreshTokenService refreshTokenService,
                             StatusTransitionPolicy statusPolicy,
@@ -69,7 +72,8 @@ public class PlatformController {
                             AdminSettingsService adminSettingsService, ContactRequestService contactRequestService,
                             UploadApplicationService uploadService, LearningRequestService learningRequestService,
                             FinanceService financeService, BookingWorkflowService bookingWorkflowService,
-                            ClassSessionService classSessionService) {
+                            ClassSessionService classSessionService,
+                            TutorApprovalEligibilityService tutorApprovalEligibilityService) {
     this.db = db;
     this.jdbc = db.jdbc();
     this.refreshTokenService = refreshTokenService;
@@ -85,6 +89,7 @@ public class PlatformController {
     this.financeService = financeService;
     this.bookingWorkflowService = bookingWorkflowService;
     this.classSessionService = classSessionService;
+    this.tutorApprovalEligibilityService = tutorApprovalEligibilityService;
   }
 
   @GetMapping("/catalog/subjects")
@@ -320,6 +325,12 @@ public class PlatformController {
     return ApiResponse.ok(db.tutorById(db.tutorIdByUserOrThrow(db.currentUserIdOrThrow()), true));
   }
 
+  @GetMapping("/tutor/approval-eligibility")
+  public ApiResponse<Map<String, Object>> myTutorApprovalEligibility() {
+    UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
+    return ApiResponse.ok(tutorApprovalEligibilityService.checkTutorApprovalEligibility(tutorId));
+  }
+
   @PatchMapping("/tutor/profile")
   public ApiResponse<Map<String, Object>> updateTutorProfile(@RequestBody Map<String, Object> body) {
     UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
@@ -341,7 +352,7 @@ public class PlatformController {
   @PostMapping("/tutor/profile/submit")
   public ApiResponse<Map<String, Object>> submitTutorProfile() {
     UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
-    jdbc.update("update tutor_profiles set status = 'pending', status_reason = null, updated_at = now() where id = ?", tutorId);
+    jdbc.update("update tutor_profiles set status = 'submitted', status_reason = null, updated_at = now() where id = ?", tutorId);
     db.notifyAdmins("info", "Hồ sơ gia sư chờ duyệt", "Có hồ sơ gia sư mới cần duyệt.", "/admin/tutors", "tutor", tutorId);
     db.auditCurrent("tutor.submit_profile", "tutor", tutorId, "Gia sư gửi hồ sơ để admin xét duyệt.");
     return ApiResponse.ok(db.tutorById(tutorId, true), "Hồ sơ đã được gửi duyệt");
@@ -444,15 +455,30 @@ public class PlatformController {
     return ApiResponse.ok(db.tutorById(tutorId, true));
   }
 
+  @GetMapping("/admin/tutors/{tutorId}/approval-eligibility")
+  public ApiResponse<Map<String, Object>> tutorApprovalEligibility(@PathVariable UUID tutorId) {
+    return ApiResponse.ok(tutorApprovalEligibilityService.checkTutorApprovalEligibility(tutorId));
+  }
+
   @PostMapping("/admin/tutors/{tutorId}/approve")
+  @Transactional
   public ApiResponse<Map<String, Object>> approveTutor(@PathVariable UUID tutorId) {
+    Map<String, Object> eligibility = tutorApprovalEligibilityService.checkTutorApprovalEligibility(tutorId);
+    if (!Boolean.TRUE.equals(eligibility.get("eligibleForApproval"))) {
+      throw new BusinessException(
+          "TUTOR_NOT_ELIGIBLE_FOR_APPROVAL",
+          "Hồ sơ gia sư chưa đủ điều kiện duyệt.",
+          HttpStatus.UNPROCESSABLE_ENTITY,
+          Map.of("reasons", eligibility.get("reasons"), "eligibility", eligibility)
+      );
+    }
     String currentStatus = jdbc.queryForObject("select status from tutor_profiles where id = ?", String.class, tutorId);
     statusPolicy.requireTutor(currentStatus, "approved");
     jdbc.update("update tutor_profiles set status = 'approved', status_reason = null, approved_at = now(), approved_by = ?, updated_at = now() where id = ?",
         db.currentUserIdOrThrow(), tutorId);
     UUID userId = jdbc.queryForObject("select user_id from tutor_profiles where id = ?", UUID.class, tutorId);
     db.notify(userId, "success", "Hồ sơ đã được duyệt", "Hồ sơ gia sư của bạn đã được phê duyệt.", "/dashboard/tutor", "tutor", tutorId);
-    db.auditCurrent("admin.approve_tutor", "tutor", tutorId, "Admin duyệt hồ sơ gia sư.");
+    db.auditCurrent("admin.approve_tutor", "tutor", tutorId, "Admin duyệt hồ sơ gia sư.", Map.of("eligibility", eligibility));
     return ApiResponse.ok(db.tutorById(tutorId, true));
   }
 

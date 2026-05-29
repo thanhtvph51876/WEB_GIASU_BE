@@ -20,6 +20,15 @@ class PermissionServiceTest {
   }
 
   @Test
+  void tutorAdminCanApproveTutorAndReviewVerificationButCannotSuspend() {
+    assertThat(PermissionService.roleHas("tutor_admin", "verifications.read")).isTrue();
+    assertThat(PermissionService.roleHas("tutor_admin", "verifications.review")).isTrue();
+    assertThat(PermissionService.roleHas("tutor_admin", "verifications.approve_document")).isTrue();
+    assertThat(PermissionService.roleHas("tutor_admin", "tutors.approve")).isTrue();
+    assertThat(PermissionService.roleHas("tutor_admin", "tutors.suspend")).isFalse();
+  }
+
+  @Test
   void systemAdminHasWildcardAccess() {
     assertThat(PermissionService.roleHas("system_admin", "settings.update")).isTrue();
     assertThat(PermissionService.roleHas("system_admin", "admin.full_access")).isTrue();

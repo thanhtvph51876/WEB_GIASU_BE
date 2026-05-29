@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.tutorplatform.verification.VerificationTerms;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
@@ -184,6 +185,7 @@ class SecurityHardeningIntegrationTest {
     UUID tutorUser = user("tutor@example.com", "Password123!", "tutor", "active");
     UUID tutor = tutor(tutorUser, "approved");
     approvedVerification(tutorUser, "tutor_identity");
+    approvedVerification(tutorUser, "tutor_certificate");
     earning(tutor, 100_000);
     earning(tutor, 200_000);
 
@@ -286,6 +288,100 @@ class SecurityHardeningIntegrationTest {
         .andExpect(status().isOk());
     assertThat(jdbc.queryForObject("select status from user_verifications where id = ?", String.class, verificationId)).isEqualTo("approved");
     assertThat(jdbc.queryForObject("select count(*) from verification_agreements where verification_id = ?", Integer.class, verificationId)).isEqualTo(1);
+  }
+
+  @Test
+  void approveTutorRequiresBackendEligibilityAndReturnsReasons() throws Exception {
+    user("admin-eligibility@example.com", "Password123!", "admin", "active");
+    UUID tutorUser = user("tutor-eligibility@example.com", "Password123!", "tutor", "active");
+    UUID tutor = tutor(tutorUser, "submitted");
+    approvedVerification(tutorUser, "tutor_identity");
+
+    String response = mvc.perform(post("/api/v1/admin/tutors/" + tutor + "/approve")
+            .header("Authorization", bearer(login("admin-eligibility@example.com", "Password123!").accessToken())))
+        .andExpect(status().isUnprocessableEntity())
+        .andReturn().getResponse().getContentAsString();
+
+    JsonNode error = objectMapper.readTree(response).path("error");
+    assertThat(error.path("code").asText()).isEqualTo("TUTOR_NOT_ELIGIBLE_FOR_APPROVAL");
+    assertThat(error.path("details").path("reasons").toString()).contains("CERTIFICATE_DOCUMENT_MISSING");
+    assertThat(jdbc.queryForObject("select status from tutor_profiles where id = ?", String.class, tutor)).isEqualTo("submitted");
+  }
+
+  @Test
+  void approveTutorWithEligibleDocumentsWritesAuditSnapshot() throws Exception {
+    user("admin-approve-tutor@example.com", "Password123!", "admin", "active");
+    UUID tutorUser = user("tutor-approved-docs@example.com", "Password123!", "tutor", "active");
+    UUID tutor = tutor(tutorUser, "submitted");
+    approvedVerification(tutorUser, "tutor_identity");
+    approvedVerification(tutorUser, "tutor_certificate");
+
+    String eligibilityResponse = mvc.perform(get("/api/v1/admin/tutors/" + tutor + "/approval-eligibility")
+            .header("Authorization", bearer(login("admin-approve-tutor@example.com", "Password123!").accessToken())))
+        .andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+    assertThat(objectMapper.readTree(eligibilityResponse).path("data").path("eligibleForApproval").asBoolean()).isTrue();
+
+    mvc.perform(post("/api/v1/admin/tutors/" + tutor + "/approve")
+            .header("Authorization", bearer(login("admin-approve-tutor@example.com", "Password123!").accessToken())))
+        .andExpect(status().isOk());
+
+    assertThat(jdbc.queryForObject("select status from tutor_profiles where id = ?", String.class, tutor)).isEqualTo("approved");
+    assertThat(jdbc.queryForObject("""
+        select count(*)
+        from audit_logs
+        where action = 'admin.approve_tutor' and entity_id = ? and metadata::text like '%eligibleForApproval%'
+        """, Integer.class, tutor)).isEqualTo(1);
+  }
+
+  @Test
+  void tutorReuploadAfterApprovalResetsProfileToPendingVerification() throws Exception {
+    UUID tutorUser = user("tutor-reupload@example.com", "Password123!", "tutor", "active");
+    UUID tutor = tutor(tutorUser, "approved");
+    String tutorAccess = login("tutor-reupload@example.com", "Password123!").accessToken();
+    MockMultipartFile file = new MockMultipartFile(
+        "file",
+        "certificate.pdf",
+        "application/pdf",
+        "%PDF-1.4\n%%EOF".getBytes()
+    );
+
+    mvc.perform(multipart("/api/v1/tutor/verifications/document/upload")
+            .file(file)
+            .param("verificationType", "tutor_certificate")
+            .param("schoolName", "Demo University")
+            .param("studentCode", "CERT-001")
+            .param("fullNameInput", "Tutor Reupload")
+            .header("Authorization", bearer(tutorAccess)))
+        .andExpect(status().isOk());
+
+    assertThat(jdbc.queryForObject("select status from tutor_profiles where id = ?", String.class, tutor)).isEqualTo("pending_verification");
+  }
+
+  @Test
+  void duplicateDocumentAcrossDifferentTutorIsFlaggedByHash() throws Exception {
+    user("tutor-one@example.com", "Password123!", "tutor", "active");
+    user("tutor-two@example.com", "Password123!", "tutor", "active");
+    String firstAccess = login("tutor-one@example.com", "Password123!").accessToken();
+    String secondAccess = login("tutor-two@example.com", "Password123!").accessToken();
+    byte[] pdf = "%PDF-1.4\nsame-file\n%%EOF".getBytes();
+
+    mvc.perform(multipart("/api/v1/tutor/verifications/document/upload")
+            .file(new MockMultipartFile("file", "identity-a.pdf", "application/pdf", pdf))
+            .param("verificationType", "tutor_identity")
+            .header("Authorization", bearer(firstAccess)))
+        .andExpect(status().isOk());
+
+    String response = mvc.perform(multipart("/api/v1/tutor/verifications/document/upload")
+            .file(new MockMultipartFile("file", "identity-b.pdf", "application/pdf", pdf))
+            .param("verificationType", "tutor_identity")
+            .header("Authorization", bearer(secondAccess)))
+        .andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+
+    JsonNode data = objectMapper.readTree(response).path("data");
+    assertThat(data.path("duplicateFile").asBoolean()).isTrue();
+    assertThat(data.path("riskScore").asInt()).isGreaterThan(60);
   }
 
   @Test
@@ -402,11 +498,26 @@ class SecurityHardeningIntegrationTest {
         """, tutorId, netAmount, netAmount);
   }
 
-  private void approvedVerification(UUID userId, String type) {
-    jdbc.update("""
+  private UUID approvedVerification(UUID userId, String type) {
+    UUID verificationId = jdbc.queryForObject("""
         insert into user_verifications(user_id, verification_type, status)
         values (?, ?, 'approved')
-        """, userId, type);
+        returning id
+        """, UUID.class, userId, type);
+    jdbc.update("""
+        insert into verification_agreements(user_id, verification_id, agreement_version, agreement_title,
+          agreement_content, agreement_content_hash, signer_full_name)
+        values (?, ?, ?, ?, ?, ?, 'Tutor Test')
+        """, userId, verificationId, VerificationTerms.VERSION, VerificationTerms.TITLE, VerificationTerms.CONTENT, VerificationTerms.CONTENT_HASH);
+    jdbc.query("select id from tutor_profiles where user_id = ?", (rs, row) -> rs.getObject("id", UUID.class), userId)
+        .stream()
+        .findFirst()
+        .ifPresent(tutorId -> jdbc.update("""
+            insert into tutor_commitments(tutor_id, commitment_version, accepted_terms_hash, full_name_at_signing, status)
+            values (?, ?, ?, 'Tutor Test', 'signed')
+            on conflict do nothing
+            """, tutorId, VerificationTerms.VERSION, VerificationTerms.CONTENT_HASH));
+    return verificationId;
   }
 
   private void ensurePaymentSettings() {

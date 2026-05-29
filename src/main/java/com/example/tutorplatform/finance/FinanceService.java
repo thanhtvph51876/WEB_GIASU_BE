@@ -284,10 +284,16 @@ public class FinanceService {
     args.add(userId);
     args.addAll(List.of(types));
     Integer count = jdbc.queryForObject("""
-        select count(*) from user_verifications
-        where user_id = ? and status = 'approved' and verification_type in (
+        select count(distinct uv.verification_type)
+        from user_verifications uv
+        join verification_agreements va on va.verification_id = uv.id
+        where uv.user_id = ?
+          and uv.status = 'approved'
+          and uv.duplicate_file = false
+          and uv.risk_score <= 60
+          and uv.verification_type in (
         """ + placeholders + ")", Integer.class, args.toArray());
-    return count != null && count > 0;
+    return count != null && count == types.length;
   }
 
   private String requiredReason(Map<String, Object> body) {
