@@ -90,7 +90,20 @@ public class DbService {
   }
 
   public UUID tutorIdByUserOrThrow(UUID userId) {
-    return tutorIdByUser(userId).orElseThrow(() -> new NotFoundException("Không tìm thấy hồ sơ gia sư."));
+    return tutorIdByUser(userId).orElseGet(() -> createDraftTutorProfileIfTutor(userId));
+  }
+
+  private UUID createDraftTutorProfileIfTutor(UUID userId) {
+    Map<String, Object> user = userById(userId).orElseThrow(() -> new NotFoundException("Không tìm thấy người dùng."));
+    if (!"tutor".equals(user.get("role"))) {
+      throw new NotFoundException("Không tìm thấy hồ sơ gia sư.");
+    }
+    return jdbc.queryForObject("""
+        insert into tutor_profiles(user_id, headline, bio, gender, university, major, status)
+        values (?, '', '', 'other', '', '', 'draft')
+        on conflict(user_id) do update set updated_at = tutor_profiles.updated_at
+        returning id
+        """, UUID.class, userId);
   }
 
   public void requireTutorOwner(UUID tutorId) {
