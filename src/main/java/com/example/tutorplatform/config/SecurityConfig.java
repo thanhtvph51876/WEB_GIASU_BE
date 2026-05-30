@@ -6,11 +6,13 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.authorization.AuthorizationDecision;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
@@ -23,7 +25,7 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 @EnableMethodSecurity
 public class SecurityConfig {
   @Bean
-  SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter) throws Exception {
+  SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter, AppProperties properties) throws Exception {
     http
         .csrf(AbstractHttpConfigurer::disable)
         .cors(cors -> {})
@@ -47,7 +49,8 @@ public class SecurityConfig {
             })
         )
         .authorizeHttpRequests(auth -> auth
-            .requestMatchers("/swagger-ui/**", "/v3/api-docs/**").permitAll()
+            .requestMatchers("/swagger-ui/**", "/v3/api-docs/**")
+            .access((authentication, context) -> new AuthorizationDecision(swaggerAllowed(authentication.get(), properties)))
             .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/refresh",
                 "/api/v1/auth/forgot-password", "/api/v1/auth/reset-password", "/api/v1/auth/verify-email").permitAll()
             .requestMatchers(HttpMethod.POST, "/api/v1/payments/webhooks/**").permitAll()
@@ -78,5 +81,15 @@ public class SecurityConfig {
     UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
     source.registerCorsConfiguration("/**", config);
     return source;
+  }
+
+  private boolean swaggerAllowed(Authentication authentication, AppProperties properties) {
+    String env = properties.env() == null ? "local" : properties.env().trim().toLowerCase();
+    if (!"prod".equals(env) && !"production".equals(env)) return true;
+    if (authentication == null || !authentication.isAuthenticated()) return false;
+    return authentication.getAuthorities().stream().anyMatch(authority ->
+        "ROLE_ADMIN".equals(authority.getAuthority()) ||
+            "ROLE_SYSTEM_ADMIN".equals(authority.getAuthority())
+    );
   }
 }

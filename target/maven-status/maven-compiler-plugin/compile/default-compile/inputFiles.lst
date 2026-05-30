@@ -96,4 +96,6 @@ H:\backend\src\main\java\com\example\tutorplatform\TutorPlatformApplication.java
 H:\backend\src\main\java\com\example\tutorplatform\verification\DuplicateDocumentService.java
 H:\backend\src\main\java\com\example\tutorplatform\verification\FraudRiskService.java
 H:\backend\src\main\java\com\example\tutorplatform\verification\OcrService.java
+H:\backend\src\main\java\com\example\tutorplatform\verification\TutorApprovalEligibilityService.java
 H:\backend\src\main\java\com\example\tutorplatform\verification\VerificationController.java
+H:\backend\src\main\java\com\example\tutorplatform\verification\VerificationTerms.java

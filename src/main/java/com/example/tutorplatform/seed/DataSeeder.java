@@ -1,6 +1,7 @@
 package com.example.tutorplatform.seed;
 
 import com.example.tutorplatform.config.AppProperties;
+import com.example.tutorplatform.verification.VerificationTerms;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -42,7 +43,7 @@ public class DataSeeder {
     jdbc.update("insert into parent_profiles(user_id, relationship_to_student, student_name, student_grade, province, district) values (?, 'Mẹ', 'Trần Minh Khang', 'Lop 8', 'Hà Nội', 'Cầu Giấy')", parent);
 
     List<UUID> studentUsers = new ArrayList<>(List.of(student, parent));
-    for (int i = 1; i <= 10; i++) {
+    for (int i = 1; i <= 18; i++) {
       String role = i % 3 == 0 ? "parent" : "student";
       UUID id = user(role + i + "@example.com", role.equals("parent") ? "Parent123!" : "Student123!", (role.equals("parent") ? "Phụ huynh " : "Học viên ") + i, "09100000" + String.format("%02d", i), role);
       studentUsers.add(id);
@@ -80,7 +81,7 @@ public class DataSeeder {
     List<UUID> approvedTutors = jdbc.query("select id from tutor_profiles where status = 'approved' order by created_at", (rs, row) -> rs.getObject("id", UUID.class));
     List<UUID> learningRequests = new ArrayList<>();
     String[] requestStatuses = {"new", "consulting", "matched", "trial_scheduled", "trial_completed", "active", "rematch", "cancelled", "completed"};
-    for (int i = 1; i <= 20; i++) {
+    for (int i = 1; i <= 30; i++) {
       UUID subjectId = subjects.get(i % subjects.size());
       UUID gradeId = grades.get(i % grades.size());
       UUID requester = studentUsers.get(i % studentUsers.size());
@@ -121,6 +122,24 @@ public class DataSeeder {
           i % 2 == 0 ? null : "TP HCM", i % 2 == 0 ? "https://meet.example.com/trial-" + i : null,
           "Học thử để đánh giá phương pháp", status, "completed".equals(status) ? "Học thử tốt" : null);
       bookings.add(bookingId);
+    }
+
+    for (int i = 1; i <= Math.min(5, bookings.size()); i++) {
+      UUID bookingId = bookings.get(i - 1);
+      UUID openedBy = jdbc.queryForObject("select student_id from trial_bookings where id = ?", UUID.class, bookingId);
+      String status = switch (i % 4) {
+        case 0 -> "RESOLVED";
+        case 1 -> "OPEN";
+        case 2 -> "IN_REVIEW";
+        default -> "REJECTED";
+      };
+      jdbc.update("""
+          insert into booking_disputes(booking_id, opened_by, status, reason, resolution, resolved_by, resolved_at)
+          values (?, ?, ?, ?, ?, ?, ?)
+          """, bookingId, openedBy, status, "Khiếu nại demo #" + i + " về lịch học hoặc chất lượng buổi học.",
+          "RESOLVED".equals(status) ? "Đã đối chiếu audit và thống nhất phương án hỗ trợ." : null,
+          "RESOLVED".equals(status) || "REJECTED".equals(status) ? admin : null,
+          "RESOLVED".equals(status) || "REJECTED".equals(status) ? OffsetDateTime.now().minusDays(i) : null);
     }
 
     List<UUID> classes = new ArrayList<>();
@@ -254,7 +273,89 @@ public class DataSeeder {
         insert into tutor_documents(tutor_id, document_type, file_name, file_url, file_size, mime_type, status)
         values (?, 'degree', ?, ?, 102400, 'application/pdf', ?)
         """, tutorId, "degree-" + index + ".pdf", "/uploads/degree-" + index + ".pdf", "approved".equals(status) ? "approved" : "pending");
+    seedTutorVerificationBundle(tutorId, userId, status, index, approvedBy);
     return tutorId;
+  }
+
+  private void seedTutorVerificationBundle(UUID tutorId, UUID userId, String profileStatus, int index, UUID admin) {
+    String documentStatus = switch (profileStatus) {
+      case "approved" -> "approved";
+      case "need_update" -> "need_more_info";
+      case "rejected" -> "rejected";
+      default -> "pending_review";
+    };
+    int riskScore = switch (profileStatus) {
+      case "approved" -> 8 + (index % 12);
+      case "rejected" -> 72;
+      case "need_update" -> 45;
+      default -> 25 + (index % 20);
+    };
+    UUID identityVerification = seedTutorVerificationDocument(userId, "tutor_identity", "identity-" + index + ".pdf", documentStatus, riskScore, admin, index);
+    seedTutorVerificationDocument(userId, "tutor_certificate", "certificate-" + index + ".pdf", documentStatus, Math.max(0, riskScore - 5), admin, index);
+    if (!"rejected".equals(profileStatus)) {
+      seedTutorCommitment(tutorId, userId, identityVerification, "seed-tutor-identity-" + index);
+    }
+  }
+
+  private UUID seedTutorVerificationDocument(UUID userId, String type, String fileName, String status, int riskScore, UUID admin, int index) {
+    String hash = "seed-" + type + "-" + index + "-" + userId;
+    UUID fileId = jdbc.queryForObject("""
+        insert into uploaded_files(owner_id, file_name, file_url, file_size, mime_type, original_file_name, storage_path,
+          visibility, sha256_hash, purpose, risk_score)
+        values (?, ?, ?, 102400, 'application/pdf', ?, ?, 'private', ?, ?, ?)
+        returning id
+        """, UUID.class, userId, fileName, "/private/seed/" + fileName, fileName, "seed/" + fileName, hash, type, riskScore);
+    UUID reviewer = List.of("approved", "rejected", "need_more_info").contains(status) ? admin : null;
+    UUID verificationId = jdbc.queryForObject("""
+        insert into user_verifications(user_id, verification_type, school_name, student_code, full_name_input, school_email,
+          document_file_id, email_verified, duplicate_file, risk_score, status, reject_reason, reviewed_by, reviewed_at)
+        values (?, ?, ?, ?, ?, ?, ?, true, false, ?, ?, ?, ?, case when ?::uuid is null then null else now() end)
+        returning id
+        """, UUID.class, userId, type, "Trường/Đại học Demo", "DEMO-" + String.format("%03d", index), fullNameByUser(userId),
+        emailByUser(userId), fileId, riskScore, status, rejectReason(status), reviewer, reviewer);
+    jdbc.update("update uploaded_files set entity_type = 'verification', entity_id = ?, updated_at = now() where id = ?", verificationId, fileId);
+    if (!"rejected".equals(status)) {
+      seedVerificationAgreement(userId, verificationId, hash);
+    }
+    return verificationId;
+  }
+
+  private void seedVerificationAgreement(UUID userId, UUID verificationId, String uploadedFileHash) {
+    jdbc.update("""
+        insert into verification_agreements(user_id, verification_id, agreement_version, agreement_title,
+          agreement_content, agreement_content_snapshot, agreement_content_hash, uploaded_file_hash,
+          signer_full_name, signer_email, otp_verified, ip_address, user_agent)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, '127.0.0.1', 'seed-data')
+        on conflict(verification_id) do nothing
+        """, userId, verificationId, VerificationTerms.VERSION, VerificationTerms.TITLE,
+        VerificationTerms.CONTENT, VerificationTerms.CONTENT, VerificationTerms.CONTENT_HASH,
+        uploadedFileHash, fullNameByUser(userId), emailByUser(userId));
+  }
+
+  private void seedTutorCommitment(UUID tutorId, UUID userId, UUID verificationId, String uploadedFileHash) {
+    jdbc.update("""
+        insert into tutor_commitments(tutor_id, commitment_version, accepted_terms_hash, full_name_at_signing,
+          identity_number_masked, signed_ip, signed_user_agent, status)
+        values (?, ?, ?, ?, 'seed-***', '127.0.0.1', 'seed-data', 'signed')
+        on conflict (tutor_id, commitment_version) where status = 'signed' do nothing
+        """, tutorId, VerificationTerms.VERSION, VerificationTerms.CONTENT_HASH, fullNameByUser(userId));
+    seedVerificationAgreement(userId, verificationId, uploadedFileHash);
+  }
+
+  private String rejectReason(String status) {
+    return switch (status) {
+      case "rejected" -> "Giấy tờ demo bị từ chối để kiểm tra luồng reject.";
+      case "need_more_info" -> "Cần bổ sung ảnh rõ nét hoặc thông tin trường.";
+      default -> null;
+    };
+  }
+
+  private String fullNameByUser(UUID userId) {
+    return jdbc.queryForObject("select full_name from users where id = ?", String.class, userId);
+  }
+
+  private String emailByUser(UUID userId) {
+    return jdbc.queryForObject("select email from users where id = ?", String.class, userId);
   }
 
   private UUID tutorUserId(UUID tutorId) {
