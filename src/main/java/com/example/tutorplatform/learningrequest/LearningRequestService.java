@@ -16,7 +16,9 @@ import com.example.tutorplatform.common.BusinessException;
 import com.example.tutorplatform.common.ForbiddenException;
 import com.example.tutorplatform.db.DbService;
 import com.example.tutorplatform.policy.StatusTransitionPolicy;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -85,6 +87,31 @@ public class LearningRequestService {
   public Map<String, Object> createPublic(Map<String, Object> body) {
     validatePublicLearningRequest(body);
     return publicLearningRequestResponse(createLearningRequestInternal(body, null));
+  }
+
+  @Transactional
+  public Map<String, Object> createPublicTrialBookingRequest(Map<String, Object> body, String ipAddress, String userAgent) {
+    validatePublicLearningRequest(body);
+    UUID tutorId = uuid(firstPresent(body, "tutorId", "tutor_id"));
+    Map<String, Object> tutor = db.tutorById(tutorId, false);
+    Map<String, Object> normalized = new LinkedHashMap<>(body);
+    normalized.put("goal", "trial_booking");
+    normalized.put("teachingMode", valueOr(firstString(body, "teachingMode", "learningMode"), "both"));
+    normalized.put("preferredSchedule", firstString(body, "preferredSchedule", "preferredTime"));
+    normalized.put("learningGoal", valueOr(firstString(body, "note", "message"), "Khách đăng ký học thử với gia sư " + tutor.get("fullName")));
+    Map<String, Object> request = createLearningRequestInternal(normalized, null, "TRIAL", tutorId, false);
+    Map<String, Object> metadata = new LinkedHashMap<>();
+    metadata.put("ip", valueOr(ipAddress, ""));
+    metadata.put("userAgent", valueOr(userAgent, ""));
+    metadata.put("tutorId", tutorId.toString());
+    db.audit(null, "guest", "public.create_trial_booking_request", "learningRequest", uuid(request.get("id")),
+        "Khách gửi yêu cầu học thử công khai.", metadata);
+    Map<String, Object> response = publicLearningRequestResponse(request);
+    response.put("type", "trialBookingRequest");
+    response.put("tutorId", tutorId.toString());
+    response.put("tutorName", tutor.get("fullName"));
+    response.put("nextStep", "Tư vấn viên sẽ liên hệ để xác nhận lịch học.");
+    return response;
   }
 
   public List<Map<String, Object>> myStudentLearningRequests() {
@@ -318,6 +345,9 @@ public class LearningRequestService {
   }
 
   private void validatePublicLearningRequest(Map<String, Object> body) {
+    if (firstString(body, "website", "homepage", "_gotcha") != null) {
+      throw new BusinessException("SPAM_DETECTED", "Yêu cầu không hợp lệ.");
+    }
     String studentName = firstString(body, "studentName");
     String parentName = firstString(body, "parentName");
     if (studentName == null && parentName == null) {
@@ -351,9 +381,16 @@ public class LearningRequestService {
     if (note != null && note.length() > 2000) {
       throw new BusinessException("FIELD_TOO_LONG", "Ghi chú vượt quá độ dài cho phép.");
     }
+    if (containsSpamLinks(note)) {
+      throw new BusinessException("SPAM_DETECTED", "Nội dung chứa quá nhiều liên kết.");
+    }
   }
 
   private Map<String, Object> createLearningRequestInternal(Map<String, Object> body, UUID userId) {
+    return createLearningRequestInternal(body, userId, "LR", null, userId != null);
+  }
+
+  private Map<String, Object> createLearningRequestInternal(Map<String, Object> body, UUID userId, String codePrefix, UUID assignedTutorId, boolean publicVisible) {
     UUID subjectId = db.requiredSubjectId(firstPresent(body, "subjectId", "subject"));
     UUID gradeId = db.gradeLevelId(firstPresent(body, "gradeLevelId", "grade"));
     UUID studentProfileId = uuidOrNull(firstPresent(body, "studentProfileId"));
@@ -366,23 +403,22 @@ public class LearningRequestService {
         throw new ForbiddenException("Bạn không có quyền tạo yêu cầu cho học sinh này.");
       }
     }
-    String code = "REQ-" + java.time.Year.now() + "-" + String.format("%03d",
-        jdbc.queryForObject("select count(*) + 1 from learning_requests where date_part('year', created_at) = date_part('year', now())", Integer.class));
+    String code = nextRequestCode(codePrefix);
     String submittedGoal = firstString(body, "goal");
     String goalCode = submittedGoal == null ? null : submittedGoal.length() <= 50 ? submittedGoal : "custom";
     String learningGoal = valueOr(firstString(body, "learningGoal"), submittedGoal != null && submittedGoal.length() > 50 ? submittedGoal : null);
     UUID id = jdbc.queryForObject("""
         insert into learning_requests(request_code, requester_id, student_profile_id, student_name, parent_name, phone, email, student_grade,
           subject_id, grade_level_id, goal, learning_mode, province, district, budget_min, budget_max,
-          preferred_schedule, learning_goal, note, status, public_visible)
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?) returning id
+          preferred_schedule, learning_goal, note, assigned_tutor_id, status, public_visible)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?) returning id
         """, UUID.class, code, userId, studentProfileId, firstString(body, "studentName"), firstString(body, "parentName"),
         firstString(body, "phone"), firstString(body, "email"), firstString(body, "grade"),
         subjectId, gradeId, valueOr(goalCode, "improve_grades"),
         valueOr(firstString(body, "teachingMode", "learningMode"), "both"), firstString(body, "province", "location"),
         firstString(body, "district"), firstInteger(body, "budgetMin", "expectedFee"),
         firstInteger(body, "budgetMax", "expectedFee"), firstString(body, "preferredSchedule"),
-        learningGoal, firstString(body, "note"), userId != null);
+        learningGoal, firstString(body, "note"), assignedTutorId, publicVisible);
     db.notifyAdmins("info", "Yêu cầu học mới", "Có yêu cầu tìm gia sư mới cần xử lý.", "/admin/learning-requests", "learningRequest", id);
     if (userId == null) {
       db.audit(null, "guest", "public.create_learning_request", "learningRequest", id, "Khách gửi nhu cầu học qua form công khai.");
@@ -390,6 +426,21 @@ public class LearningRequestService {
       db.auditCurrent("student.create_learning_request", "learningRequest", id, "Tạo yêu cầu tìm gia sư mới.");
     }
     return db.learningRequestById(id);
+  }
+
+  private String nextRequestCode(String prefix) {
+    String day = LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
+    Integer count = jdbc.queryForObject("select count(*) + 1 from learning_requests where request_code like ?", Integer.class, prefix + "-" + day + "-%");
+    return prefix + "-" + day + "-" + String.format("%04d", count == null ? 1 : count);
+  }
+
+  private boolean containsSpamLinks(String value) {
+    if (value == null || value.isBlank()) return false;
+    String lower = value.toLowerCase();
+    int links = 0;
+    int index = -1;
+    while ((index = lower.indexOf("http", index + 1)) >= 0) links++;
+    return links > 1;
   }
 
   private Map<String, Object> publicLearningRequestResponse(Map<String, Object> request) {

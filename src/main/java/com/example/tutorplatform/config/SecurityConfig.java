@@ -54,7 +54,7 @@ public class SecurityConfig {
             .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/refresh",
                 "/api/v1/auth/forgot-password", "/api/v1/auth/reset-password", "/api/v1/auth/verify-email").permitAll()
             .requestMatchers(HttpMethod.POST, "/api/v1/payments/webhooks/**").permitAll()
-            .requestMatchers(HttpMethod.POST, "/api/v1/public/learning-requests").permitAll()
+            .requestMatchers(HttpMethod.POST, "/api/v1/public/learning-requests", "/api/v1/public/trial-booking-requests").permitAll()
             .requestMatchers(HttpMethod.GET, "/api/v1/files/**").permitAll()
             .requestMatchers(HttpMethod.GET, "/api/v1/tutors/**", "/api/v1/catalog/**", "/api/v1/public/**", "/api/v1/master-data/**").permitAll()
             .requestMatchers(HttpMethod.POST, "/api/v1/contact-requests").permitAll()

@@ -55,7 +55,16 @@ public class RateLimitFilter extends OncePerRequestFilter {
       return new Rule(10, Duration.ofMinutes(1));
     }
     if ("POST".equals(method) && path.equals("/api/v1/public/learning-requests")) {
-      return new Rule(8, Duration.ofHours(1));
+      return new Rule(3, Duration.ofHours(1));
+    }
+    if ("POST".equals(method) && path.equals("/api/v1/public/trial-booking-requests")) {
+      return new Rule(3, Duration.ofHours(1));
+    }
+    if ("POST".equals(method) && path.equals("/api/v1/contact-requests")) {
+      return new Rule(5, Duration.ofHours(1));
+    }
+    if ("GET".equals(method) && (path.equals("/api/v1/tutors") || path.matches("/api/v1/tutors/[0-9a-fA-F-]{36}"))) {
+      return new Rule(120, Duration.ofMinutes(1));
     }
     if ("POST".equals(method) && (path.equals("/api/v1/uploads") || path.contains("/verifications/") && path.endsWith("/upload"))) {
       return new Rule(20, Duration.ofMinutes(10));

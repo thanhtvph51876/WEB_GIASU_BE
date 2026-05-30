@@ -20,6 +20,7 @@ import com.example.tutorplatform.notification.NotificationService;
 import com.example.tutorplatform.policy.StatusTransitionPolicy;
 import com.example.tutorplatform.tutoringclass.ClassSessionService;
 import com.example.tutorplatform.verification.TutorApprovalEligibilityService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import java.io.IOException;
@@ -274,12 +275,14 @@ public class PlatformController {
       where.append(" and tp.status = 'approved' ");
     }
     long total = db.tutorCount(where.toString(), new ArrayList<>(args), false);
-    return ApiResponse.page(db.tutorList(where.toString(), args, page, pageSize, false), PageMetadata.of(page, pageSize, total));
+    return ApiResponse.page(db.tutorList(where.toString(), args, page, pageSize, false).stream()
+        .map(tutor -> publicTutorDto(tutor, false))
+        .toList(), PageMetadata.of(page, pageSize, total));
   }
 
   @GetMapping("/tutors/{tutorId}")
   public ApiResponse<Map<String, Object>> tutor(@PathVariable UUID tutorId) {
-    return ApiResponse.ok(db.tutorById(tutorId, db.isAdmin()));
+    return ApiResponse.ok(publicTutorDto(db.tutorById(tutorId, false), true));
   }
 
   @GetMapping("/favorites/tutors")
@@ -526,6 +529,15 @@ public class PlatformController {
   @Transactional
   public ApiResponse<Map<String, Object>> createPublicLearningRequest(@RequestBody Map<String, Object> body) {
     return ApiResponse.ok(learningRequestService.createPublic(body), "Yêu cầu đã được gửi. Admin sẽ kiểm tra trước khi xử lý.");
+  }
+
+  @PostMapping("/public/trial-booking-requests")
+  @Transactional
+  public ApiResponse<Map<String, Object>> createPublicTrialBookingRequest(@RequestBody Map<String, Object> body, HttpServletRequest request) {
+    return ApiResponse.ok(
+        learningRequestService.createPublicTrialBookingRequest(body, clientIp(request), request.getHeader("User-Agent")),
+        "Yêu cầu học thử đã được gửi. Tư vấn viên sẽ liên hệ để xác nhận lịch."
+    );
   }
 
   @GetMapping("/student/learning-requests/me")
@@ -840,7 +852,9 @@ public class PlatformController {
 
   @GetMapping("/tutors/{tutorId}/reviews")
   public ApiResponse<List<Map<String, Object>>> tutorReviews(@PathVariable UUID tutorId) {
-    return ApiResponse.ok(db.reviews(" where r.tutor_id = ? and r.status = 'visible'", tutorId));
+    return ApiResponse.ok(db.reviews(" where r.tutor_id = ? and r.status = 'visible'", tutorId).stream()
+        .map(this::publicReviewDto)
+        .toList());
   }
 
   @GetMapping("/admin/reviews")
@@ -1135,6 +1149,71 @@ public class PlatformController {
     db.notify(userId, "approved".equals(status) ? "success" : "warning", title, valueOr(reason, title), "/dashboard/tutor/profile", "tutor", tutorId);
     db.auditCurrent("admin." + status + "_tutor", "tutor", tutorId, "Admin cập nhật trạng thái gia sư thành " + status + ".");
     return ApiResponse.ok(db.tutorById(tutorId, true));
+  }
+
+  private Map<String, Object> publicTutorDto(Map<String, Object> raw, boolean detail) {
+    Map<String, Object> m = new LinkedHashMap<>();
+    m.put("id", raw.get("id"));
+    m.put("fullName", raw.get("fullName"));
+    m.put("avatar", raw.get("avatar"));
+    m.put("gender", raw.get("gender"));
+    m.put("university", raw.get("university"));
+    m.put("faculty", raw.get("faculty"));
+    m.put("major", raw.get("major"));
+    m.put("subjects", raw.getOrDefault("subjects", List.of()));
+    m.put("grades", raw.getOrDefault("grades", List.of()));
+    m.put("experienceYears", raw.get("experienceYears"));
+    m.put("teachingModes", raw.get("teachingModes"));
+    m.put("locations", raw.getOrDefault("locations", List.of()));
+    m.put("pricePerHour", raw.get("pricePerHour"));
+    m.put("rating", raw.get("rating"));
+    m.put("reviewCount", raw.get("reviewCount"));
+    m.put("verified", raw.get("verified"));
+    m.put("status", "approved");
+    m.put("approvalStatus", "approved");
+    m.put("availableSlots", raw.getOrDefault("availableSlots", List.of()));
+    m.put("verifiedBadges", List.of("identity_verified", "certificate_verified", "agreement_signed", "platform_approved"));
+    if (detail) {
+      m.put("bio", raw.get("bio"));
+      m.put("teachingMethod", raw.get("teachingMethod"));
+      m.put("achievements", raw.getOrDefault("achievements", List.of()));
+      m.put("certificates", raw.getOrDefault("certificates", List.of()));
+      m.put("totalStudents", raw.get("totalStudents"));
+      m.put("totalClasses", raw.get("totalClasses"));
+      m.put("responseRate", raw.get("responseRate"));
+      m.put("createdAt", raw.get("createdAt"));
+    }
+    return m;
+  }
+
+  private Map<String, Object> publicReviewDto(Map<String, Object> raw) {
+    Map<String, Object> m = new LinkedHashMap<>();
+    m.put("id", raw.get("id"));
+    m.put("tutorId", raw.get("tutorId"));
+    m.put("studentName", maskReviewerName(raw.get("studentName")));
+    m.put("rating", raw.get("rating"));
+    m.put("content", raw.get("content"));
+    m.put("createdAt", raw.get("createdAt"));
+    return m;
+  }
+
+  private String maskReviewerName(Object value) {
+    String name = value == null ? "" : value.toString().trim();
+    if (name.isBlank()) return "Phụ huynh đã xác thực";
+    StringBuilder initials = new StringBuilder();
+    for (String part : name.split("\\s+")) {
+      if (!part.isBlank()) {
+        if (initials.length() > 0) initials.append('.');
+        initials.append(Character.toUpperCase(part.charAt(0)));
+      }
+    }
+    return "Phụ huynh " + initials;
+  }
+
+  private String clientIp(HttpServletRequest request) {
+    String forwardedFor = request.getHeader("X-Forwarded-For");
+    if (forwardedFor != null && !forwardedFor.isBlank()) return forwardedFor.split(",")[0].trim();
+    return request.getRemoteAddr();
   }
 
   private ApiResponse<Map<String, Object>> reviewDocument(UUID documentId, String status, String note) {

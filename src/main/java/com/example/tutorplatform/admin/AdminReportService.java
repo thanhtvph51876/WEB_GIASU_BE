@@ -1,13 +1,19 @@
 package com.example.tutorplatform.admin;
 
 import com.example.tutorplatform.db.DbService;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;
 
 @Service
 public class AdminReportService {
+  private static final Logger log = LoggerFactory.getLogger(AdminReportService.class);
   private final DbService db;
   private final JdbcTemplate jdbc;
 
@@ -30,16 +36,22 @@ public class AdminReportService {
   }
 
   public List<Map<String, Object>> requestTrends() {
-    return jdbc.query("""
-        select to_char(date_trunc('month', created_at), 'YYYY-MM') month, count(*) count
-        from learning_requests group by 1 order by 1
-        """, (rs, row) -> Map.of("month", rs.getString("month"), "count", rs.getInt("count")));
+    return safeReport("requestTrends", """
+        select to_char(date_trunc('month', coalesce(created_at, updated_at, now())), 'YYYY-MM') as bucket_month,
+               count(*)::int as total
+        from learning_requests
+        group by bucket_month
+        order by bucket_month
+        """, (rs, row) -> row("month", rs.getString("bucket_month"), "count", rs.getInt("total")));
   }
 
   public List<Map<String, Object>> conversionFunnel() {
-    return jdbc.query("""
-        select status stage, count(*) count from learning_requests group by status order by status
-        """, (rs, row) -> Map.of("stage", rs.getString("stage"), "count", rs.getInt("count")));
+    return safeReport("conversionFunnel", """
+        select coalesce(status, 'unknown') stage, count(*)::int count
+        from learning_requests
+        group by stage
+        order by stage
+        """, (rs, row) -> row("stage", rs.getString("stage"), "count", rs.getInt("count")));
   }
 
   public List<Map<String, Object>> tutorStatusDistribution() {
@@ -47,26 +59,33 @@ public class AdminReportService {
   }
 
   public List<Map<String, Object>> subjectDistribution() {
-    return jdbc.query("""
-        select s.name subject, count(lr.id) count from subjects s
+    return safeReport("subjectDistribution", """
+        select coalesce(s.name, 'Chưa phân loại') subject, count(lr.id)::int count
+        from subjects s
         left join learning_requests lr on lr.subject_id = s.id
-        group by s.name order by count desc
-        """, (rs, row) -> Map.of("subject", rs.getString("subject"), "count", rs.getInt("count")));
+        group by subject
+        order by count desc
+        """, (rs, row) -> row("subject", rs.getString("subject"), "count", rs.getInt("count")));
   }
 
   public List<Map<String, Object>> teachingModeDistribution() {
-    return jdbc.query("""
-        select learning_mode mode, count(*) count from learning_requests
-        where learning_mode is not null
-        group by learning_mode order by learning_mode
-        """, (rs, row) -> Map.of("mode", rs.getString("mode"), "count", rs.getInt("count")));
+    return safeReport("teachingModeDistribution", """
+        select coalesce(learning_mode, 'unknown') mode, count(*)::int count
+        from learning_requests
+        group by mode
+        order by mode
+        """, (rs, row) -> row("mode", rs.getString("mode"), "count", rs.getInt("count")));
   }
 
   public List<Map<String, Object>> revenue() {
-    return jdbc.query("""
-        select to_char(date_trunc('month', created_at), 'YYYY-MM') month, coalesce(sum(amount),0) revenue
-        from payments where status in ('paid','completed') group by 1 order by 1
-        """, (rs, row) -> Map.of("month", rs.getString("month"), "revenue", rs.getLong("revenue")));
+    return safeReport("revenue", """
+        select to_char(date_trunc('month', coalesce(created_at, paid_at, now())), 'YYYY-MM') month,
+               coalesce(sum(amount),0) revenue
+        from payments
+        where status in ('paid','completed')
+        group by month
+        order by month
+        """, (rs, row) -> row("month", rs.getString("month"), "revenue", rs.getLong("revenue")));
   }
 
   public List<Map<String, Object>> paymentStatusDistribution() {
@@ -94,7 +113,27 @@ public class AdminReportService {
   }
 
   private List<Map<String, Object>> distribution(String table, String column, String label) {
-    return jdbc.query("select " + column + " value, count(*) count from " + table + " group by " + column + " order by count desc",
-        (rs, row) -> Map.of(label, rs.getString("value"), "count", rs.getInt("count")));
+    return safeReport("distribution:" + table + "." + column,
+        "select coalesce(" + column + "::text, 'unknown') value, count(*)::int count from " + table + " group by value order by count desc",
+        (rs, row) -> row(label, rs.getString("value"), "count", rs.getInt("count")));
+  }
+
+  private List<Map<String, Object>> safeReport(String reportName, String sql, RowMapper<Map<String, Object>> mapper) {
+    try {
+      return jdbc.query(sql, mapper);
+    } catch (DataAccessException ex) {
+      log.warn("Admin report {} failed; returning empty dataset", reportName, ex);
+      return List.of();
+    }
+  }
+
+  private Map<String, Object> row(Object... entries) {
+    Map<String, Object> row = new LinkedHashMap<>();
+    for (int i = 0; i + 1 < entries.length; i += 2) {
+      String key = String.valueOf(entries[i]);
+      Object value = entries[i + 1];
+      row.put(key, value == null ? "unknown" : value);
+    }
+    return row;
   }
 }
