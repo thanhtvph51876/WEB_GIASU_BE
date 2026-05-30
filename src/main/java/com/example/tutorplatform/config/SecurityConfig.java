@@ -24,72 +24,78 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 @Configuration
 @EnableMethodSecurity
 public class SecurityConfig {
-  @Bean
-  SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter, AppProperties properties) throws Exception {
-    http
-        .csrf(AbstractHttpConfigurer::disable)
-        .cors(cors -> {})
-        .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-        .headers(headers -> headers
-            .contentTypeOptions(Customizer.withDefaults())
-            .frameOptions(frame -> frame.sameOrigin())
-            .referrerPolicy(referrer -> referrer.policy(org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER))
-            .httpStrictTransportSecurity(hsts -> hsts.includeSubDomains(true).maxAgeInSeconds(31536000))
-        )
-        .exceptionHandling(ex -> ex
-            .authenticationEntryPoint((request, response, authException) -> {
-              response.setStatus(HttpStatus.UNAUTHORIZED.value());
-              response.setContentType("application/json;charset=UTF-8");
-              response.getWriter().write("{\"success\":false,\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"Bạn cần đăng nhập.\"}}");
-            })
-            .accessDeniedHandler((request, response, accessDeniedException) -> {
-              response.setStatus(HttpStatus.FORBIDDEN.value());
-              response.setContentType("application/json;charset=UTF-8");
-              response.getWriter().write("{\"success\":false,\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Bạn không có quyền thực hiện thao tác này.\"}}");
-            })
-        )
-        .authorizeHttpRequests(auth -> auth
-            .requestMatchers("/swagger-ui/**", "/v3/api-docs/**")
-            .access((authentication, context) -> new AuthorizationDecision(swaggerAllowed(authentication.get(), properties)))
-            .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/refresh",
-                "/api/v1/auth/forgot-password", "/api/v1/auth/reset-password", "/api/v1/auth/verify-email").permitAll()
-            .requestMatchers(HttpMethod.POST, "/api/v1/payments/webhooks/**").permitAll()
-            .requestMatchers(HttpMethod.POST, "/api/v1/public/learning-requests", "/api/v1/public/trial-booking-requests").permitAll()
-            .requestMatchers(HttpMethod.GET, "/api/v1/files/**").permitAll()
-            .requestMatchers(HttpMethod.GET, "/api/v1/tutors/**", "/api/v1/catalog/**", "/api/v1/public/**", "/api/v1/master-data/**").permitAll()
-            .requestMatchers(HttpMethod.POST, "/api/v1/contact-requests").permitAll()
-            .requestMatchers("/api/v1/admin/**").hasAnyRole("ADMIN", "FINANCE_ADMIN", "TUTOR_ADMIN", "SUPPORT_ADMIN", "VERIFICATION_ADMIN", "SYSTEM_ADMIN")
-            .requestMatchers("/api/v1/tutor/**").hasRole("TUTOR")
-            .anyRequest().authenticated()
-        )
-        .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
-    return http.build();
-  }
 
-  @Bean
-  PasswordEncoder passwordEncoder() {
-    return new BCryptPasswordEncoder(12);
-  }
+    @Bean
+    SecurityFilterChain securityFilterChain(
+            HttpSecurity http,
+            JwtAuthenticationFilter jwtFilter,
+            AppProperties properties,
+            CorsConfigurationSource corsConfigurationSource  // ← inject vào đây
+    ) throws Exception {
+        http
+                .csrf(AbstractHttpConfigurer::disable)
+                .cors(cors -> cors.configurationSource(corsConfigurationSource))  // ← fix chỗ này
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .headers(headers -> headers
+                        .contentTypeOptions(Customizer.withDefaults())
+                        .frameOptions(frame -> frame.sameOrigin())
+                        .referrerPolicy(referrer -> referrer.policy(org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER))
+                        .httpStrictTransportSecurity(hsts -> hsts.includeSubDomains(true).maxAgeInSeconds(31536000))
+                )
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint((request, response, authException) -> {
+                            response.setStatus(HttpStatus.UNAUTHORIZED.value());
+                            response.setContentType("application/json;charset=UTF-8");
+                            response.getWriter().write("{\"success\":false,\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"Bạn cần đăng nhập.\"}}");
+                        })
+                        .accessDeniedHandler((request, response, accessDeniedException) -> {
+                            response.setStatus(HttpStatus.FORBIDDEN.value());
+                            response.setContentType("application/json;charset=UTF-8");
+                            response.getWriter().write("{\"success\":false,\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Bạn không có quyền thực hiện thao tác này.\"}}");
+                        })
+                )
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/swagger-ui/**", "/v3/api-docs/**")
+                        .access((authentication, context) -> new AuthorizationDecision(swaggerAllowed(authentication.get(), properties)))
+                        .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/refresh",
+                                "/api/v1/auth/forgot-password", "/api/v1/auth/reset-password", "/api/v1/auth/verify-email").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/v1/payments/webhooks/**").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/v1/public/learning-requests", "/api/v1/public/trial-booking-requests").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/v1/files/**").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/v1/tutors/**", "/api/v1/catalog/**", "/api/v1/public/**", "/api/v1/master-data/**").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/v1/contact-requests").permitAll()
+                        .requestMatchers("/api/v1/admin/**").hasAnyRole("ADMIN", "FINANCE_ADMIN", "TUTOR_ADMIN", "SUPPORT_ADMIN", "VERIFICATION_ADMIN", "SYSTEM_ADMIN")
+                        .requestMatchers("/api/v1/tutor/**").hasRole("TUTOR")
+                        .anyRequest().authenticated()
+                )
+                .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
+        return http.build();
+    }
 
-  @Bean
-  CorsConfigurationSource corsConfigurationSource(AppProperties properties) {
-    CorsConfiguration config = new CorsConfiguration();
-    config.setAllowedOrigins(properties.cors().allowedOrigins());
-    config.setAllowedMethods(Arrays.asList("GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"));
-    config.setAllowedHeaders(Arrays.asList("Authorization", "Content-Type", "Accept"));
-    config.setAllowCredentials(true);
-    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-    source.registerCorsConfiguration("/**", config);
-    return source;
-  }
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder(12);
+    }
 
-  private boolean swaggerAllowed(Authentication authentication, AppProperties properties) {
-    String env = properties.env() == null ? "local" : properties.env().trim().toLowerCase();
-    if (!"prod".equals(env) && !"production".equals(env)) return true;
-    if (authentication == null || !authentication.isAuthenticated()) return false;
-    return authentication.getAuthorities().stream().anyMatch(authority ->
-        "ROLE_ADMIN".equals(authority.getAuthority()) ||
-            "ROLE_SYSTEM_ADMIN".equals(authority.getAuthority())
-    );
-  }
+    @Bean
+    CorsConfigurationSource corsConfigurationSource(AppProperties properties) {
+        CorsConfiguration config = new CorsConfiguration();
+        config.setAllowedOrigins(properties.cors().allowedOrigins());
+        config.setAllowedMethods(Arrays.asList("GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"));
+        config.setAllowedHeaders(Arrays.asList("Authorization", "Content-Type", "Accept"));
+        config.setAllowCredentials(true);
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", config);
+        return source;
+    }
+
+    private boolean swaggerAllowed(Authentication authentication, AppProperties properties) {
+        String env = properties.env() == null ? "local" : properties.env().trim().toLowerCase();
+        if (!"prod".equals(env) && !"production".equals(env)) return true;
+        if (authentication == null || !authentication.isAuthenticated()) return false;
+        return authentication.getAuthorities().stream().anyMatch(authority ->
+                "ROLE_ADMIN".equals(authority.getAuthority()) ||
+                        "ROLE_SYSTEM_ADMIN".equals(authority.getAuthority())
+        );
+    }
 }
