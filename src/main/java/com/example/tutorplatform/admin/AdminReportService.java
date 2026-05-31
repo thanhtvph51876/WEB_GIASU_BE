@@ -47,9 +47,9 @@ public class AdminReportService {
 
   public List<Map<String, Object>> conversionFunnel() {
     return safeReport("conversionFunnel", """
-        select coalesce(status, 'unknown') stage, count(*)::int count
+        select coalesce(status, 'unknown') as stage, count(*)::int as count
         from learning_requests
-        group by stage
+        group by coalesce(status, 'unknown')
         order by stage
         """, (rs, row) -> row("stage", rs.getString("stage"), "count", rs.getInt("count")));
   }
@@ -70,9 +70,9 @@ public class AdminReportService {
 
   public List<Map<String, Object>> teachingModeDistribution() {
     return safeReport("teachingModeDistribution", """
-        select coalesce(learning_mode, 'unknown') mode, count(*)::int count
+        select coalesce(learning_mode, 'unknown') as mode, count(*)::int as count
         from learning_requests
-        group by mode
+        group by coalesce(learning_mode, 'unknown')
         order by mode
         """, (rs, row) -> row("mode", rs.getString("mode"), "count", rs.getInt("count")));
   }
