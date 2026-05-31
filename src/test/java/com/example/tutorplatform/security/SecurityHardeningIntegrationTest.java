@@ -228,6 +228,14 @@ class SecurityHardeningIntegrationTest {
   }
 
   @Test
+  void invalidLoginReturnsUnauthorizedNotInternalError() throws Exception {
+    mvc.perform(post("/api/v1/auth/login")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(json(Map.of("email", "missing-login@example.com", "password", "WrongPassword123"))))
+        .andExpect(status().isUnauthorized());
+  }
+
+  @Test
   void publicLearningRequestDoesNotReturnPii() throws Exception {
     UUID student = user("student-pii@example.com", "Password123!", "student", "active");
     UUID subject = subject();

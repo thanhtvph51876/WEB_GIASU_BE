@@ -2,6 +2,8 @@ package com.example.tutorplatform.config;
 
 import com.example.tutorplatform.security.JwtAuthenticationFilter;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Objects;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -55,6 +57,7 @@ public class SecurityConfig {
                         })
                 )
                 .authorizeHttpRequests(auth -> auth
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers("/swagger-ui/**", "/v3/api-docs/**")
                         .access((authentication, context) -> new AuthorizationDecision(swaggerAllowed(authentication.get(), properties)))
                         .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/refresh",
@@ -80,13 +83,25 @@ public class SecurityConfig {
     @Bean
     CorsConfigurationSource corsConfigurationSource(AppProperties properties) {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOrigins(properties.cors().allowedOrigins());
+        config.setAllowedOrigins(sanitizeCorsOrigins(properties.cors().allowedOrigins()));
         config.setAllowedMethods(Arrays.asList("GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"));
-        config.setAllowedHeaders(Arrays.asList("Authorization", "Content-Type", "Accept"));
+        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With", "X-Request-ID"));
+        config.setExposedHeaders(List.of("Authorization", "Location", "X-Request-ID"));
         config.setAllowCredentials(true);
+        config.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
         return source;
+    }
+
+    private List<String> sanitizeCorsOrigins(List<String> origins) {
+        if (origins == null) return List.of();
+        return origins.stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(origin -> !origin.isBlank())
+                .distinct()
+                .toList();
     }
 
     private boolean swaggerAllowed(Authentication authentication, AppProperties properties) {
