@@ -490,11 +490,68 @@ public class DbService {
     }
     args.add(pageSize);
     args.add(Math.max(0, (page - 1) * pageSize));
+    if (admin) {
+      return jdbc.query("""
+          select tp.*, u.full_name, u.avatar_url
+          from tutor_profiles tp
+          join users u on u.id = tp.user_id
+          """ + where + " order by tp.rating_avg desc, tp.created_at desc limit ? offset ?", tutorMapper(), args.toArray());
+    }
     return jdbc.query("""
-        select tp.*, u.full_name, u.avatar_url
+        select tp.id, tp.user_id, tp.status, tp.gender, tp.headline, tp.university, tp.education, tp.major,
+               tp.experience_years, tp.hourly_rate_min, tp.hourly_rate_max, tp.rating_avg, tp.rating_count,
+               tp.created_at, tp.updated_at, u.full_name, u.avatar_url,
+               coalesce((
+                 select string_agg(name, '||' order by name)
+                 from (
+                   select distinct s.name
+                   from tutor_subjects ts
+                   join subjects s on s.id = ts.subject_id
+                   where ts.tutor_id = tp.id
+                 ) subject_names
+               ), '') subjects_text,
+               coalesce((
+                 select string_agg(name, '||' order by name)
+                 from (
+                   select distinct gl.name
+                   from tutor_subjects ts
+                   join grade_levels gl on gl.id = ts.grade_level_id
+                   where ts.tutor_id = tp.id
+                 ) grade_names
+               ), '') grades_text,
+               coalesce((
+                 select string_agg(province, '||' order by province)
+                 from (
+                   select distinct tl.province
+                   from tutor_locations tl
+                   where tl.tutor_id = tp.id and tl.province is not null and tl.province <> ''
+                 ) location_names
+               ), '') locations_text,
+               coalesce((
+                 select case
+                   when bool_or(tl.teaching_mode = 'both') or (bool_or(tl.teaching_mode = 'online') and bool_or(tl.teaching_mode = 'offline')) then 'both'
+                   when bool_or(tl.teaching_mode = 'offline') then 'offline'
+                   else 'online'
+                 end
+                 from tutor_locations tl
+                 where tl.tutor_id = tp.id
+               ), 'online') teaching_modes,
+               coalesce((
+                 select jsonb_agg(jsonb_build_object(
+                   'id', ta.id::text,
+                   'dayOfWeek', ta.day_of_week,
+                   'startTime', to_char(ta.start_time, 'HH24:MI'),
+                   'endTime', to_char(ta.end_time, 'HH24:MI'),
+                   'isActive', ta.is_active,
+                   'createdAt', ta.created_at,
+                   'updatedAt', ta.updated_at
+                 ) order by ta.day_of_week, ta.start_time)
+                 from tutor_availability ta
+                 where ta.tutor_id = tp.id and ta.is_active = true
+               ), '[]'::jsonb)::text available_slots_json
         from tutor_profiles tp
         join users u on u.id = tp.user_id
-        """ + where + " order by tp.rating_avg desc, tp.created_at desc limit ? offset ?", tutorMapper(), args.toArray());
+        """ + where + " order by tp.rating_avg desc, tp.created_at desc limit ? offset ?", publicTutorListMapper(), args.toArray());
   }
 
   public long tutorCount(String extraWhere, List<Object> args, boolean admin) {
@@ -723,6 +780,58 @@ public class DbService {
     if (modes.contains("both") || (modes.contains("online") && modes.contains("offline"))) return "both";
     if (modes.contains("offline")) return "offline";
     return "online";
+  }
+
+  private RowMapper<Map<String, Object>> publicTutorListMapper() {
+    return (rs, row) -> {
+      int min = intOrZero(rs, "hourly_rate_min");
+      int max = intOrZero(rs, "hourly_rate_max");
+      Map<String, Object> m = base(rs);
+      m.put("userId", str(rs, "user_id"));
+      m.put("status", rs.getString("status"));
+      m.put("approvalStatus", rs.getString("status"));
+      m.put("fullName", rs.getString("full_name"));
+      m.put("avatar", rs.getString("avatar_url"));
+      m.put("gender", valueOr(rs.getString("gender"), "other"));
+      m.put("headline", rs.getString("headline"));
+      m.put("university", valueOr(rs.getString("university"), ""));
+      m.put("faculty", valueOr(rs.getString("education"), ""));
+      m.put("education", rs.getString("education"));
+      m.put("major", valueOr(rs.getString("major"), ""));
+      m.put("subjects", splitAggregatedList(rs.getString("subjects_text")));
+      m.put("grades", splitAggregatedList(rs.getString("grades_text")));
+      m.put("experienceYears", rs.getInt("experience_years"));
+      m.put("teachingModes", rs.getString("teaching_modes"));
+      m.put("locations", splitAggregatedList(rs.getString("locations_text")));
+      m.put("pricePerHour", min > 0 ? min : max);
+      m.put("hourlyRateMin", nullableInt(rs, "hourly_rate_min"));
+      m.put("hourlyRateMax", nullableInt(rs, "hourly_rate_max"));
+      m.put("rating", rs.getBigDecimal("rating_avg") == null ? 0 : rs.getBigDecimal("rating_avg").doubleValue());
+      m.put("ratingAvg", m.get("rating"));
+      m.put("reviewCount", rs.getInt("rating_count"));
+      m.put("ratingCount", rs.getInt("rating_count"));
+      m.put("verified", "approved".equals(rs.getString("status")));
+      m.put("availableSlots", jsonObjectList(rs.getString("available_slots_json")));
+      return m;
+    };
+  }
+
+  private List<String> splitAggregatedList(String raw) {
+    if (raw == null || raw.isBlank()) return List.of();
+    List<String> values = new ArrayList<>();
+    for (String item : raw.split("\\|\\|")) {
+      if (item != null && !item.isBlank()) values.add(item);
+    }
+    return values;
+  }
+
+  private List<Map<String, Object>> jsonObjectList(String raw) {
+    if (raw == null || raw.isBlank()) return List.of();
+    try {
+      return objectMapper.readValue(raw, objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class));
+    } catch (Exception ex) {
+      return List.of();
+    }
   }
 
   private List<String> listStrings(String sql, Object... args) {
