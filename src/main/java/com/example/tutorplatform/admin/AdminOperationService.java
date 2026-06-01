@@ -1,6 +1,8 @@
 package com.example.tutorplatform.admin;
 
 import com.example.tutorplatform.db.DbService;
+import com.example.tutorplatform.common.BusinessException;
+import com.example.tutorplatform.common.NotFoundException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
@@ -14,8 +16,10 @@ import org.springframework.stereotype.Service;
 @Service
 public class AdminOperationService {
   private final JdbcTemplate jdbc;
+  private final DbService db;
 
   public AdminOperationService(DbService db) {
+    this.db = db;
     this.jdbc = db.jdbc();
   }
 
@@ -123,6 +127,35 @@ public class AdminOperationService {
         """);
   }
 
+  public Map<String, Object> dispute(UUID id) {
+    List<Map<String, Object>> rows = jdbc.query("""
+        select bd.*, tb.student_name, s.name subject
+        from booking_disputes bd join trial_bookings tb on tb.id = bd.booking_id join subjects s on s.id = tb.subject_id
+        where bd.id = ?
+        """, this::mapAny, id);
+    if (rows.isEmpty()) throw new NotFoundException("Không tìm thấy khiếu nại.");
+    return rows.get(0);
+  }
+
+  public Map<String, Object> updateDispute(UUID id, Map<String, Object> body) {
+    String status = string(body.get("status"));
+    String resolution = string(body.get("resolution"));
+    if (status == null || !List.of("OPEN", "IN_REVIEW", "RESOLVED", "REJECTED").contains(status)) {
+      throw new BusinessException("INVALID_DISPUTE_STATUS", "Trạng thái khiếu nại không hợp lệ.");
+    }
+    boolean terminal = List.of("RESOLVED", "REJECTED").contains(status);
+    jdbc.update("""
+        update booking_disputes
+        set status = ?, resolution = coalesce(?, resolution),
+          resolved_by = case when ? then ? else resolved_by end,
+          resolved_at = case when ? then now() else resolved_at end,
+          updated_at = now()
+        where id = ?
+        """, status, resolution, terminal, terminal ? db.currentUserIdOrThrow() : null, terminal, id);
+    db.auditCurrent("admin.dispute.update", "bookingDispute", id, "Admin cập nhật khiếu nại sang " + status + ".");
+    return dispute(id);
+  }
+
   private List<Map<String, Object>> query(String sql) {
     return jdbc.query(sql, this::mapAny);
   }
@@ -153,5 +186,9 @@ public class AdminOperationService {
       else sb.append(c);
     }
     return sb.toString();
+  }
+
+  private String string(Object value) {
+    return value == null || String.valueOf(value).isBlank() ? null : String.valueOf(value);
   }
 }

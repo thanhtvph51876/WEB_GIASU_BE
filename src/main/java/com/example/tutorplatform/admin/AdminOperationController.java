@@ -3,7 +3,11 @@ package com.example.tutorplatform.admin;
 import com.example.tutorplatform.common.ApiResponse;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -54,5 +58,15 @@ public class AdminOperationController {
   @GetMapping("/disputes")
   public ApiResponse<List<Map<String, Object>>> disputes() {
     return ApiResponse.ok(service.disputes());
+  }
+
+  @GetMapping("/disputes/{id}")
+  public ApiResponse<Map<String, Object>> dispute(@PathVariable UUID id) {
+    return ApiResponse.ok(service.dispute(id));
+  }
+
+  @PatchMapping("/disputes/{id}")
+  public ApiResponse<Map<String, Object>> updateDispute(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+    return ApiResponse.ok(service.updateDispute(id, body));
   }
 }

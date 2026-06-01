@@ -80,6 +80,7 @@ public class AdminPermissionInterceptor implements HandlerInterceptor {
     if (path.equals(ADMIN_PREFIX + "/notifications") || path.startsWith(ADMIN_PREFIX + "/notifications/")) return "notifications.read";
 
     if (path.startsWith(ADMIN_PREFIX + "/operations") || path.equals(ADMIN_PREFIX + "/disputes")) return "operations.read";
+    if (path.startsWith(ADMIN_PREFIX + "/disputes/")) return read ? "operations.read" : "admin.full_access";
     if (path.startsWith(ADMIN_PREFIX + "/reports")) return "reports.read";
     if (path.equals(ADMIN_PREFIX + "/settings") || path.startsWith(ADMIN_PREFIX + "/system-settings")) return read ? "settings.read" : "settings.update";
     if (path.startsWith(ADMIN_PREFIX + "/master-data")) return read ? "master_data.read" : "master_data.manage";
