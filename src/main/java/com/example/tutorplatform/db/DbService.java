@@ -22,6 +22,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class DbService {
+  private static final int DEFAULT_LIST_LIMIT = 500;
+  private static final int MAX_LIST_LIMIT = 1000;
   private final JdbcTemplate jdbc;
   private final ObjectMapper objectMapper;
 
@@ -305,8 +307,12 @@ public class DbService {
       m.put("startDate", rs.getObject("start_date") == null ? null : rs.getObject("start_date", LocalDate.class).toString());
       m.put("endDate", rs.getObject("end_date") == null ? null : rs.getObject("end_date", LocalDate.class).toString());
       m.put("status", rs.getString("status"));
-      m.put("totalSessions", jdbc.queryForObject("select count(*) from class_sessions where class_id = ?", Integer.class, classId));
-      m.put("completedSessions", jdbc.queryForObject("select count(*) from class_sessions where class_id = ? and status = 'completed'", Integer.class, classId));
+      m.put("totalSessions", hasColumn(rs, "total_sessions_count")
+          ? rs.getInt("total_sessions_count")
+          : jdbc.queryForObject("select count(*) from class_sessions where class_id = ?", Integer.class, classId));
+      m.put("completedSessions", hasColumn(rs, "completed_sessions_count")
+          ? rs.getInt("completed_sessions_count")
+          : jdbc.queryForObject("select count(*) from class_sessions where class_id = ? and status = 'completed'", Integer.class, classId));
       return m;
     };
   }
@@ -571,12 +577,16 @@ public class DbService {
   }
 
   public List<Map<String, Object>> learningRequests(String where, Object... args) {
+    return learningRequestsPage(where, DEFAULT_LIST_LIMIT, 0, args);
+  }
+
+  public List<Map<String, Object>> learningRequestsPage(String where, int limit, int offset, Object... args) {
     return jdbc.query("""
         select lr.*, s.name subject_name, gl.name grade_name
         from learning_requests lr
         join subjects s on s.id = lr.subject_id
         left join grade_levels gl on gl.id = lr.grade_level_id
-        """ + where + " order by lr.created_at desc", learningRequestMapper(), args);
+        """ + where + " order by lr.created_at desc limit ? offset ?", learningRequestMapper(), withLimit(args, limit, offset));
   }
 
   public Map<String, Object> learningRequestById(UUID id) {
@@ -590,12 +600,16 @@ public class DbService {
   }
 
   public List<Map<String, Object>> bookings(String where, Object... args) {
+    return bookingsPage(where, DEFAULT_LIST_LIMIT, 0, args);
+  }
+
+  public List<Map<String, Object>> bookingsPage(String where, int limit, int offset, Object... args) {
     return jdbc.query("""
         select tb.*, s.name subject_name, gl.name grade_name
         from trial_bookings tb
         join subjects s on s.id = tb.subject_id
         left join grade_levels gl on gl.id = tb.grade_level_id
-        """ + where + " order by tb.created_at desc", bookingMapper(), args);
+        """ + where + " order by tb.created_at desc limit ? offset ?", bookingMapper(), withLimit(args, limit, offset));
   }
 
   public Map<String, Object> bookingById(UUID id) {
@@ -609,7 +623,11 @@ public class DbService {
   }
 
   public List<Map<String, Object>> classes(String where, Object... args) {
-    return jdbc.query(classSelect() + where + " order by tc.updated_at desc", classMapper(), args);
+    return classesPage(where, DEFAULT_LIST_LIMIT, 0, args);
+  }
+
+  public List<Map<String, Object>> classesPage(String where, int limit, int offset, Object... args) {
+    return jdbc.query(classSelect() + where + " order by tc.updated_at desc limit ? offset ?", classMapper(), withLimit(args, limit, offset));
   }
 
   public Map<String, Object> classById(UUID id) {
@@ -617,7 +635,11 @@ public class DbService {
   }
 
   public List<Map<String, Object>> sessions(String where, Object... args) {
-    return jdbc.query(sessionSelect() + where + " order by cs.scheduled_start asc", sessionMapper(), args);
+    return sessionsPage(where, DEFAULT_LIST_LIMIT, 0, args);
+  }
+
+  public List<Map<String, Object>> sessionsPage(String where, int limit, int offset, Object... args) {
+    return jdbc.query(sessionSelect() + where + " order by cs.scheduled_start asc limit ? offset ?", sessionMapper(), withLimit(args, limit, offset));
   }
 
   public Map<String, Object> sessionById(UUID id) {
@@ -625,11 +647,15 @@ public class DbService {
   }
 
   public List<Map<String, Object>> reviews(String where, Object... args) {
+    return reviewsPage(where, DEFAULT_LIST_LIMIT, 0, args);
+  }
+
+  public List<Map<String, Object>> reviewsPage(String where, int limit, int offset, Object... args) {
     return jdbc.query("""
         select r.*, u.full_name reviewer_name, u.avatar_url
         from reviews r
         join users u on u.id = r.reviewer_id
-        """ + where + " order by r.created_at desc", reviewMapper(), args);
+        """ + where + " order by r.created_at desc limit ? offset ?", reviewMapper(), withLimit(args, limit, offset));
   }
 
   public void notify(UUID userId, String type, String title, String message, String actionUrl, String entityType, UUID entityId) {
@@ -700,7 +726,7 @@ public class DbService {
   private String classSelect() {
     return """
         select tc.*, su.full_name student_name, tu.full_name tutor_name, s.name subject_name, gl.name grade_name,
-               lr.parent_name
+               lr.parent_name, session_stats.total_sessions_count, session_stats.completed_sessions_count
         from tutoring_classes tc
         join users su on su.id = tc.student_id
         join tutor_profiles tp on tp.id = tc.tutor_id
@@ -708,6 +734,12 @@ public class DbService {
         join subjects s on s.id = tc.subject_id
         left join grade_levels gl on gl.id = tc.grade_level_id
         left join learning_requests lr on lr.id = tc.learning_request_id
+        left join lateral (
+          select count(*)::int total_sessions_count,
+                 count(*) filter (where status = 'completed')::int completed_sessions_count
+          from class_sessions cs_count
+          where cs_count.class_id = tc.id
+        ) session_stats on true
         """;
   }
 
@@ -888,6 +920,18 @@ public class DbService {
       if (rs.getMetaData().getColumnLabel(i).equalsIgnoreCase(column)) return true;
     }
     return false;
+  }
+
+  private Object[] withLimit(Object[] args, int limit, int offset) {
+    List<Object> queryArgs = new ArrayList<>(List.of(args));
+    queryArgs.add(boundedLimit(limit));
+    queryArgs.add(Math.max(0, offset));
+    return queryArgs.toArray();
+  }
+
+  private int boundedLimit(int limit) {
+    if (limit <= 0) return DEFAULT_LIST_LIMIT;
+    return Math.min(limit, MAX_LIST_LIMIT);
   }
 
   public List<Object> mutableArgs() {

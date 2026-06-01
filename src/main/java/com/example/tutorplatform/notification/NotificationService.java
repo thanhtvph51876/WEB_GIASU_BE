@@ -1,10 +1,13 @@
 package com.example.tutorplatform.notification;
 
 import static com.example.tutorplatform.platform.PlatformRequestSupport.firstString;
+import static com.example.tutorplatform.platform.PlatformRequestSupport.list;
 import static com.example.tutorplatform.platform.PlatformRequestSupport.uuid;
 import static com.example.tutorplatform.platform.PlatformRequestSupport.valueOr;
 
+import com.example.tutorplatform.common.BusinessException;
 import com.example.tutorplatform.db.DbService;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -23,7 +26,7 @@ public class NotificationService {
 
   public List<Map<String, Object>> notifications() {
     UUID userId = db.currentUserIdOrThrow();
-    return jdbc.query("select * from notifications where user_id = ? and deleted_at is null order by created_at desc", db.notificationMapper(), userId);
+    return jdbc.query("select * from notifications where user_id = ? and deleted_at is null order by created_at desc limit 200", db.notificationMapper(), userId);
   }
 
   public Map<String, Object> unreadCount() {
@@ -59,9 +62,81 @@ public class NotificationService {
     return jdbc.query("select * from notifications where deleted_at is null order by created_at desc limit 500", db.notificationMapper());
   }
 
+  public List<Map<String, Object>> adminNotifications(int limit, int offset) {
+    return jdbc.query("select * from notifications where deleted_at is null order by created_at desc limit ? offset ?", db.notificationMapper(), limit, offset);
+  }
+
   public Map<String, Object> adminSend(Map<String, Object> body) {
     UUID userId = uuid(firstString(body, "userId"));
-    db.notify(userId, valueOr(firstString(body, "type"), "info"), firstString(body, "title"), firstString(body, "message", "content"), firstString(body, "actionUrl", "link"), null, null);
-    return Map.of("sent", true);
+    String type = valueOr(firstString(body, "type"), "info");
+    String title = requiredText(body, "title");
+    String message = requiredText(body, "message", "content");
+    String actionUrl = firstString(body, "actionUrl", "link");
+    db.notify(userId, type, title, message, actionUrl, null, null);
+    db.auditCurrent("admin.send_notification", "notification", null, "Admin gửi thông báo tới 1 người dùng.");
+    return Map.of("sent", true, "count", 1, "recipientIds", List.of(userId.toString()));
+  }
+
+  public Map<String, Object> adminSendBulk(Map<String, Object> body) {
+    List<UUID> recipients = resolveRecipients(body);
+    if (recipients.isEmpty()) {
+      throw new BusinessException("NO_NOTIFICATION_RECIPIENTS", "Không có người nhận active phù hợp.");
+    }
+
+    String type = valueOr(firstString(body, "type"), "info");
+    String title = requiredText(body, "title");
+    String message = requiredText(body, "message", "content");
+    String actionUrl = firstString(body, "actionUrl", "link");
+    List<Object[]> rows = recipients.stream()
+        .map(userId -> new Object[] {userId, type, title, message, actionUrl, "adminBroadcast", null})
+        .toList();
+
+    jdbc.batchUpdate("""
+        insert into notifications(user_id, type, title, message, action_url, entity_type, entity_id)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """, rows);
+    String targetRole = valueOr(firstString(body, "targetRole", "role"), "all");
+    db.auditCurrent("admin.send_notification_bulk", "notification", null,
+        "Admin gửi thông báo hàng loạt tới " + recipients.size() + " người dùng.",
+        Map.of("targetRole", targetRole, "recipientCount", recipients.size(), "title", title));
+    return Map.of(
+        "sent", true,
+        "count", recipients.size(),
+        "targetRole", targetRole,
+        "recipientIds", recipients.stream().map(UUID::toString).toList()
+    );
+  }
+
+  private List<UUID> resolveRecipients(Map<String, Object> body) {
+    LinkedHashSet<UUID> recipients = new LinkedHashSet<>();
+    String singleUserId = firstString(body, "userId");
+    if (singleUserId != null) {
+      recipients.add(uuid(singleUserId));
+    }
+    for (Object userId : list(body == null ? null : body.get("userIds"))) {
+      if (userId != null && !userId.toString().isBlank()) {
+        recipients.add(uuid(userId));
+      }
+    }
+    if (!recipients.isEmpty()) {
+      return recipients.stream().toList();
+    }
+
+    String role = valueOr(firstString(body, "targetRole", "role"), "all");
+    String sql = "select id from users where status = 'active' and role <> 'guest' order by created_at desc";
+    List<UUID> userIds = "all".equals(role)
+        ? jdbc.query(sql, (rs, row) -> rs.getObject("id", UUID.class))
+        : jdbc.query("select id from users where status = 'active' and role = ? order by created_at desc",
+            (rs, row) -> rs.getObject("id", UUID.class), role);
+    recipients.addAll(userIds);
+    return recipients.stream().toList();
+  }
+
+  private String requiredText(Map<String, Object> body, String... keys) {
+    String value = firstString(body, keys);
+    if (value == null || value.isBlank()) {
+      throw new BusinessException("INVALID_NOTIFICATION_PAYLOAD", "Thiếu tiêu đề hoặc nội dung thông báo.");
+    }
+    return value;
   }
 }

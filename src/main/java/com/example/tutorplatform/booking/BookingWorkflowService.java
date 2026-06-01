@@ -135,6 +135,10 @@ public class BookingWorkflowService {
     return db.bookings("");
   }
 
+  public List<Map<String, Object>> adminBookings(int limit, int offset) {
+    return db.bookingsPage("", limit, offset);
+  }
+
   public Map<String, Object> adminBooking(UUID bookingId) {
     return db.bookingById(bookingId);
   }

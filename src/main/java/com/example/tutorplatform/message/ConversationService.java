@@ -30,6 +30,7 @@ public class ConversationService {
         join conversation_members cm on cm.conversation_id = c.id
         where cm.user_id = ?
         order by c.updated_at desc
+        limit 200
         """, db.conversationMapper(userId), userId);
   }
 
@@ -54,7 +55,12 @@ public class ConversationService {
   public List<Map<String, Object>> messages(UUID conversationId) {
     UUID userId = db.currentUserIdOrThrow();
     requireConversationMember(conversationId, userId);
-    return jdbc.query("select * from messages where conversation_id = ? order by created_at", db.messageMapper(userId), conversationId);
+    return jdbc.query("""
+        select * from (
+          select * from messages where conversation_id = ? order by created_at desc limit 300
+        ) recent_messages
+        order by created_at
+        """, db.messageMapper(userId), conversationId);
   }
 
   public Map<String, Object> sendMessage(UUID conversationId, String content) {
@@ -74,7 +80,11 @@ public class ConversationService {
   }
 
   public List<Map<String, Object>> adminConversations() {
-    return jdbc.query("select * from conversations order by updated_at desc", db.conversationMapper(db.currentUserIdOrThrow()));
+    return jdbc.query("select * from conversations order by updated_at desc limit 200", db.conversationMapper(db.currentUserIdOrThrow()));
+  }
+
+  public List<Map<String, Object>> adminConversations(int limit, int offset) {
+    return jdbc.query("select * from conversations order by updated_at desc limit ? offset ?", db.conversationMapper(db.currentUserIdOrThrow()), limit, offset);
   }
 
   public Map<String, Object> adminConversation(UUID conversationId) {

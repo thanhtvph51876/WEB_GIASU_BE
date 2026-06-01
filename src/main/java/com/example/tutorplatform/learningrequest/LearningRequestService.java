@@ -184,6 +184,10 @@ public class LearningRequestService {
     return db.learningRequests("");
   }
 
+  public List<Map<String, Object>> adminLearningRequests(int limit, int offset) {
+    return db.learningRequestsPage("", limit, offset);
+  }
+
   public Map<String, Object> adminLearningRequest(UUID requestId) {
     return db.learningRequestById(requestId);
   }

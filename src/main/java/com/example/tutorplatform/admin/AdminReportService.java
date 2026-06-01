@@ -130,6 +130,14 @@ public class AdminReportService {
         """, db.auditMapper());
   }
 
+  public List<Map<String, Object>> auditLogs(int limit, int offset) {
+    return jdbc.query("""
+        select al.*, u.full_name actor_name from audit_logs al
+        left join users u on u.id = al.actor_id
+        order by al.created_at desc limit ? offset ?
+        """, db.auditMapper(), limit, offset);
+  }
+
   public void clearCache() {
     cache.clear();
   }

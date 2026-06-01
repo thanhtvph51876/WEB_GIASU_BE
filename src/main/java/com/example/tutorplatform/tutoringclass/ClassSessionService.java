@@ -111,6 +111,14 @@ public class ClassSessionService {
     return db.sessions("");
   }
 
+  public List<Map<String, Object>> adminClasses(int limit, int offset) {
+    return db.classesPage("", limit, offset);
+  }
+
+  public List<Map<String, Object>> adminSessions(int limit, int offset) {
+    return db.sessionsPage("", limit, offset);
+  }
+
   public Map<String, Object> createClass(Map<String, Object> body) {
     UUID studentId = uuid(firstPresent(body, "studentId"));
     UUID tutorId = uuid(firstPresent(body, "tutorId"));

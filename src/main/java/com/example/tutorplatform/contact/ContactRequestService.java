@@ -2,6 +2,7 @@ package com.example.tutorplatform.contact;
 
 import static com.example.tutorplatform.platform.PlatformRequestSupport.firstString;
 
+import com.example.tutorplatform.common.BusinessException;
 import com.example.tutorplatform.db.DbService;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
@@ -32,16 +33,45 @@ public class ContactRequestService {
   }
 
   public List<Map<String, Object>> adminContacts() {
-    return jdbc.query("select * from contact_requests order by created_at desc", contactMapper());
+    return jdbc.query(contactSelect() + " order by cr.created_at desc limit 500", contactMapper());
+  }
+
+  public List<Map<String, Object>> adminContacts(int limit, int offset) {
+    return jdbc.query(contactSelect() + " order by cr.created_at desc limit ? offset ?", contactMapper(), limit, offset);
   }
 
   public Map<String, Object> updateStatus(UUID contactId, Map<String, Object> body) {
-    jdbc.update("update contact_requests set status = ?, updated_at = now() where id = ?", firstString(body, "status"), contactId);
+    String status = firstString(body, "status");
+    if (!List.of("new", "contacted", "resolved", "ignored").contains(status)) {
+      throw new BusinessException("INVALID_CONTACT_STATUS", "Trạng thái liên hệ không hợp lệ.");
+    }
+    UUID actorId = db.currentUserIdOrThrow();
+    String note = firstString(body, "handlerNote", "note", "reason");
+    jdbc.update("""
+        update contact_requests
+        set status = ?,
+            assigned_to = ?,
+            handled_at = case when ? <> 'new' then now() else handled_at end,
+            handler_note = coalesce(?, handler_note),
+            updated_at = now()
+        where id = ?
+        """, status, actorId, status, note, contactId);
+    db.auditCurrent("admin.update_contact_request", "contactRequest", contactId,
+        "Admin cập nhật trạng thái liên hệ thành " + status + ".",
+        Map.of("status", status));
     return contactById(contactId);
   }
 
   private Map<String, Object> contactById(UUID contactId) {
-    return jdbc.queryForObject("select * from contact_requests where id = ?", contactMapper(), contactId);
+    return jdbc.queryForObject(contactSelect() + " where cr.id = ?", contactMapper(), contactId);
+  }
+
+  private String contactSelect() {
+    return """
+        select cr.*, au.full_name handled_by_name, au.email handled_by_email
+        from contact_requests cr
+        left join users au on au.id = cr.assigned_to
+        """;
   }
 
   private RowMapper<Map<String, Object>> contactMapper() {
@@ -55,6 +85,16 @@ public class ContactRequestService {
       m.put("status", rs.getString("status"));
       m.put("createdAt", rs.getObject("created_at", OffsetDateTime.class).toString());
       m.put("updatedAt", rs.getObject("updated_at", OffsetDateTime.class).toString());
+      Object assignedTo = rs.getObject("assigned_to");
+      Object handledAt = rs.getObject("handled_at");
+      String handledBy = rs.getString("handled_by_name");
+      m.put("assignedTo", assignedTo == null ? null : assignedTo.toString());
+      m.put("assignedToName", handledBy);
+      m.put("handledById", assignedTo == null ? null : assignedTo.toString());
+      m.put("handledBy", handledBy);
+      m.put("handledByEmail", rs.getString("handled_by_email"));
+      m.put("handledAt", handledAt == null ? null : rs.getObject("handled_at", OffsetDateTime.class).toString());
+      m.put("handlerNote", rs.getString("handler_note"));
       return m;
     };
   }

@@ -35,7 +35,7 @@ public class FinanceService {
 
   public List<Map<String, Object>> payments() {
     UUID userId = db.currentUserIdOrThrow();
-    return jdbc.query("select * from payments where user_id = ? order by created_at desc", db.paymentMapper(), userId);
+    return jdbc.query("select * from payments where user_id = ? order by created_at desc limit 300", db.paymentMapper(), userId);
   }
 
   public Map<String, Object> payment(UUID paymentId) {
@@ -48,12 +48,12 @@ public class FinanceService {
 
   public List<Map<String, Object>> tutorEarnings() {
     UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
-    return jdbc.query("select * from tutor_earnings where tutor_id = ? order by created_at desc", db.earningMapper(), tutorId);
+    return jdbc.query("select * from tutor_earnings where tutor_id = ? order by created_at desc limit 300", db.earningMapper(), tutorId);
   }
 
   public List<Map<String, Object>> tutorPayments() {
     UUID tutorId = db.tutorIdByUserOrThrow(db.currentUserIdOrThrow());
-    return jdbc.query("select * from payments where tutor_id = ? order by created_at desc", db.paymentMapper(), tutorId);
+    return jdbc.query("select * from payments where tutor_id = ? order by created_at desc limit 300", db.paymentMapper(), tutorId);
   }
 
   public List<Map<String, Object>> tutorPayouts() {
@@ -62,6 +62,7 @@ public class FinanceService {
         select p.*, u.full_name tutor_name from payouts p
         join tutor_profiles tp on tp.id = p.tutor_id join users u on u.id = tp.user_id
         where p.tutor_id = ? order by p.created_at desc
+        limit 300
         """, db.payoutMapper(), tutorId);
   }
 
@@ -86,7 +87,11 @@ public class FinanceService {
   }
 
   public List<Map<String, Object>> adminPayments() {
-    return jdbc.query("select * from payments order by created_at desc", db.paymentMapper());
+    return jdbc.query("select * from payments order by created_at desc limit 500", db.paymentMapper());
+  }
+
+  public List<Map<String, Object>> adminPayments(int limit, int offset) {
+    return jdbc.query("select * from payments order by created_at desc limit ? offset ?", db.paymentMapper(), limit, offset);
   }
 
   public Map<String, Object> adminPayment(UUID paymentId) {
@@ -110,7 +115,17 @@ public class FinanceService {
         select p.*, u.full_name tutor_name from payouts p
         join tutor_profiles tp on tp.id = p.tutor_id join users u on u.id = tp.user_id
         order by p.created_at desc
+        limit 500
         """, db.payoutMapper());
+  }
+
+  public List<Map<String, Object>> adminPayouts(int limit, int offset) {
+    return jdbc.query("""
+        select p.*, u.full_name tutor_name from payouts p
+        join tutor_profiles tp on tp.id = p.tutor_id join users u on u.id = tp.user_id
+        order by p.created_at desc
+        limit ? offset ?
+        """, db.payoutMapper(), limit, offset);
   }
 
   public Map<String, Object> adminPayout(UUID payoutId) {

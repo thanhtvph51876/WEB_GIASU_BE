@@ -5,18 +5,24 @@ import com.example.tutorplatform.common.BusinessException;
 import com.example.tutorplatform.common.NotFoundException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 @Service
 public class AdminOperationService {
+  private static final Duration CACHE_TTL = Duration.ofSeconds(20);
   private final JdbcTemplate jdbc;
   private final DbService db;
+  private final Map<String, CacheEntry<?>> cache = new ConcurrentHashMap<>();
 
   public AdminOperationService(DbService db) {
     this.db = db;
@@ -24,36 +30,38 @@ public class AdminOperationService {
   }
 
   public Map<String, Object> overview() {
-    int trialUpcoming = count("select count(*) from trial_bookings where status = 'scheduled' and scheduled_start between now() and now() + interval '48 hours'");
-    int noShow = count("select count(*) from booking_no_show_records where created_at > now() - interval '30 days'");
-    int paymentPending = count("select count(*) from payments where status in ('pending','processing','failed')");
-    int payoutPending = count("select count(*) from payouts where status in ('pending','processing','approved')");
-    int verificationPending = count("select count(*) from user_verifications where status in ('pending_review','need_more_info')");
-    int disputePending = count("select count(*) from booking_disputes where status in ('OPEN','IN_REVIEW')");
-    return Map.ofEntries(
-        Map.entry("newRequests", count("select count(*) from learning_requests where status in ('new','submitted')")),
-        Map.entry("unmatchedRequests", count("select count(*) from learning_requests where assigned_tutor_id is null and status in ('new','submitted','matching','waiting_tutor_proposal')")),
-        Map.entry("overdueRequests", count("select count(*) from learning_requests where status not in ('cancelled','completed','closed','converted_to_class') and created_at < now() - interval '24 hours'")),
-        Map.entry("riskyRequests", count("select count(*) from learning_requests lr where status in ('matching','waiting_tutor_proposal') and not exists (select 1 from tutor_proposals tp where tp.learning_request_id = lr.id) and lr.created_at < now() - interval '12 hours'")),
-        Map.entry("trialUpcoming", trialUpcoming),
-        Map.entry("upcomingTrialBookings", trialUpcoming),
-        Map.entry("trialCancelled", count("select count(*) from trial_bookings where status in ('cancelled','cancelled_by_parent','cancelled_by_tutor') and updated_at > now() - interval '7 days'")),
-        Map.entry("noShow", noShow),
-        Map.entry("noShowBookings", noShow),
-        Map.entry("activeClasses", count("select count(*) from tutoring_classes where status = 'active'")),
-        Map.entry("paymentPending", paymentPending),
-        Map.entry("pendingPayments", paymentPending),
-        Map.entry("payoutPending", payoutPending),
-        Map.entry("pendingPayouts", payoutPending),
-        Map.entry("verificationPending", verificationPending),
-        Map.entry("pendingVerifications", verificationPending),
-        Map.entry("disputePending", disputePending),
-        Map.entry("pendingDisputes", disputePending)
-    );
+    return cached("overview", () -> {
+      int trialUpcoming = count("select count(*) from trial_bookings where status = 'scheduled' and scheduled_start between now() and now() + interval '48 hours'");
+      int noShow = count("select count(*) from booking_no_show_records where created_at > now() - interval '30 days'");
+      int paymentPending = count("select count(*) from payments where status in ('pending','processing','failed')");
+      int payoutPending = count("select count(*) from payouts where status in ('pending','processing','approved')");
+      int verificationPending = count("select count(*) from user_verifications where status in ('pending_review','need_more_info')");
+      int disputePending = count("select count(*) from booking_disputes where status in ('OPEN','IN_REVIEW')");
+      return Map.ofEntries(
+          Map.entry("newRequests", count("select count(*) from learning_requests where status in ('new','submitted')")),
+          Map.entry("unmatchedRequests", count("select count(*) from learning_requests where assigned_tutor_id is null and status in ('new','submitted','matching','waiting_tutor_proposal')")),
+          Map.entry("overdueRequests", count("select count(*) from learning_requests where status not in ('cancelled','completed','closed','converted_to_class') and created_at < now() - interval '24 hours'")),
+          Map.entry("riskyRequests", count("select count(*) from learning_requests lr where status in ('matching','waiting_tutor_proposal') and not exists (select 1 from tutor_proposals tp where tp.learning_request_id = lr.id) and lr.created_at < now() - interval '12 hours'")),
+          Map.entry("trialUpcoming", trialUpcoming),
+          Map.entry("upcomingTrialBookings", trialUpcoming),
+          Map.entry("trialCancelled", count("select count(*) from trial_bookings where status in ('cancelled','cancelled_by_parent','cancelled_by_tutor') and updated_at > now() - interval '7 days'")),
+          Map.entry("noShow", noShow),
+          Map.entry("noShowBookings", noShow),
+          Map.entry("activeClasses", count("select count(*) from tutoring_classes where status = 'active'")),
+          Map.entry("paymentPending", paymentPending),
+          Map.entry("pendingPayments", paymentPending),
+          Map.entry("payoutPending", payoutPending),
+          Map.entry("pendingPayouts", payoutPending),
+          Map.entry("verificationPending", verificationPending),
+          Map.entry("pendingVerifications", verificationPending),
+          Map.entry("disputePending", disputePending),
+          Map.entry("pendingDisputes", disputePending)
+      );
+    });
   }
 
   public List<Map<String, Object>> matchingQueue() {
-    return query("""
+    return cached("matchingQueue", () -> query("""
         select lr.id, lr.request_code, lr.student_name, lr.parent_name, lr.status, lr.created_at, s.name subject, gl.name grade,
           lr.province, lr.district,
           (select count(*) from tutor_proposals tp where tp.learning_request_id = lr.id) proposal_count
@@ -62,11 +70,11 @@ public class AdminOperationService {
         left join grade_levels gl on gl.id = lr.grade_level_id
         where lr.status in ('new','submitted','matching','waiting_tutor_proposal','proposal_received','rematch')
         order by lr.created_at asc limit 200
-        """);
+        """));
   }
 
   public List<Map<String, Object>> bookingRisk() {
-    return query("""
+    return cached("bookingRisk", () -> query("""
         select tb.id, tb.status, tb.learning_mode, tb.scheduled_start, tb.scheduled_start scheduled_start_time,
           tb.location, tb.parent_confirmed_at, tb.tutor_confirmed_at,
           tb.student_name, s.name subject, tu.full_name tutor_name
@@ -77,54 +85,67 @@ public class AdminOperationService {
         where tb.status in ('requested','parent_confirmed','tutor_confirmed','reschedule_requested','cancelled_by_parent','cancelled_by_tutor','no_show_parent','no_show_tutor')
            or (tb.status = 'scheduled' and tb.scheduled_start < now() + interval '24 hours')
         order by tb.updated_at desc limit 200
-        """);
+        """));
   }
 
   public List<Map<String, Object>> verificationRisk() {
-    return query("""
+    return cached("verificationRisk", () -> query("""
         select uv.id, uv.verification_type, uv.status, uv.duplicate_file, uv.risk_score, uv.created_at, u.email, u.full_name
         from user_verifications uv join users u on u.id = uv.user_id
         where uv.status in ('pending_review','need_more_info') or uv.duplicate_file = true or uv.risk_score >= 70
         order by uv.risk_score desc, uv.created_at asc limit 200
-        """);
+        """));
   }
 
   public List<Map<String, Object>> paymentReconciliation() {
-    return query("""
+    return cached("paymentReconciliation", () -> query("""
         select p.id, p.amount, p.currency, p.status, p.gateway, p.created_at, p.updated_at,
           u.full_name user_name, u.full_name full_name,
           (select count(*) from payment_transactions pt where pt.payment_id = p.id) transaction_count
         from payments p join users u on u.id = p.user_id
         where p.status in ('pending','processing','failed','expired')
         order by p.created_at asc limit 200
-        """);
+        """));
   }
 
   public List<Map<String, Object>> payoutQueue() {
-    return query("""
+    return cached("payoutQueue", () -> query("""
         select po.id, po.amount, po.status, po.created_at, po.bank_name, po.bank_account, u.full_name tutor_name
         from payouts po join tutor_profiles tp on tp.id = po.tutor_id join users u on u.id = tp.user_id
         where po.status in ('pending','processing','approved')
         order by po.created_at asc limit 200
-        """);
+        """));
   }
 
   public List<Map<String, Object>> tutorQuality() {
-    return query("""
+    return cached("tutorQuality", () -> query("""
         select tp.id, u.full_name tutor_name, tp.rating_avg, tp.rating_count, tp.response_rate, tp.total_sessions,
           (select count(*) from trial_bookings tb where tb.tutor_id = tp.id and tb.status in ('cancelled_by_tutor','no_show_tutor')) quality_incidents
         from tutor_profiles tp join users u on u.id = tp.user_id
         where tp.status = 'approved' and (tp.rating_avg < 3.5 or tp.response_rate < 50 or exists (select 1 from trial_bookings tb where tb.tutor_id = tp.id and tb.status in ('cancelled_by_tutor','no_show_tutor')))
         order by quality_incidents desc, tp.rating_avg asc limit 200
-        """);
+        """));
   }
 
   public List<Map<String, Object>> disputes() {
-    return query("""
+    return cached("disputes", () -> query("""
         select bd.*, tb.student_name, s.name subject
         from booking_disputes bd join trial_bookings tb on tb.id = bd.booking_id join subjects s on s.id = tb.subject_id
         order by bd.created_at desc limit 200
-        """);
+        """));
+  }
+
+  public List<Map<String, Object>> disputes(int limit, int offset) {
+    return jdbc.query("""
+        select bd.*, tb.student_name, s.name subject
+        from booking_disputes bd join trial_bookings tb on tb.id = bd.booking_id join subjects s on s.id = tb.subject_id
+        order by bd.created_at desc limit ? offset ?
+        """, this::mapAny, limit, offset);
+  }
+
+  public long disputeCount() {
+    Long total = jdbc.queryForObject("select count(*) from booking_disputes", Long.class);
+    return total == null ? 0 : total;
   }
 
   public Map<String, Object> dispute(UUID id) {
@@ -153,6 +174,7 @@ public class AdminOperationService {
         where id = ?
         """, status, resolution, terminal, terminal ? db.currentUserIdOrThrow() : null, terminal, id);
     db.auditCurrent("admin.dispute.update", "bookingDispute", id, "Admin cập nhật khiếu nại sang " + status + ".");
+    cache.clear();
     return dispute(id);
   }
 
@@ -191,4 +213,17 @@ public class AdminOperationService {
   private String string(Object value) {
     return value == null || String.valueOf(value).isBlank() ? null : String.valueOf(value);
   }
+
+  @SuppressWarnings("unchecked")
+  private <T> T cached(String key, Supplier<T> loader) {
+    CacheEntry<?> existing = cache.get(key);
+    if (existing != null && existing.expiresAt().isAfter(Instant.now())) {
+      return (T) existing.value();
+    }
+    T value = loader.get();
+    cache.put(key, new CacheEntry<>(value, Instant.now().plus(CACHE_TTL)));
+    return value;
+  }
+
+  private record CacheEntry<T>(T value, Instant expiresAt) {}
 }
