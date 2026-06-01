@@ -1,6 +1,7 @@
 H:\backend\src\main\java\com\example\tutorplatform\admin\AdminMasterDataController.java
 H:\backend\src\main\java\com\example\tutorplatform\admin\AdminOperationController.java
 H:\backend\src\main\java\com\example\tutorplatform\admin\AdminOperationService.java
+H:\backend\src\main\java\com\example\tutorplatform\admin\AdminReportRefreshService.java
 H:\backend\src\main\java\com\example\tutorplatform\admin\AdminReportService.java
 H:\backend\src\main\java\com\example\tutorplatform\admin\AdminSettingsService.java
 H:\backend\src\main\java\com\example\tutorplatform\auth\AuthController.java

@@ -1,4 +1,4 @@
 -------------------------------------------------------------------------------
 Test set: com.example.tutorplatform.security.SecurityHardeningIntegrationTest
 -------------------------------------------------------------------------------
-Tests run: 16, Failures: 0, Errors: 0, Skipped: 16, Time elapsed: 0.003 s -- in com.example.tutorplatform.security.SecurityHardeningIntegrationTest
+Tests run: 17, Failures: 0, Errors: 0, Skipped: 17, Time elapsed: 0.016 s -- in com.example.tutorplatform.security.SecurityHardeningIntegrationTest
