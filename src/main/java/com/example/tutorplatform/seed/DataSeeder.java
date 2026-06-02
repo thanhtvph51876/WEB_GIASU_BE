@@ -34,13 +34,22 @@ public class DataSeeder {
     if (users != null && users > 0) return;
 
     UUID admin = user("admin@example.com", "Admin123!", "Quản trị viên", "0900000001", "admin");
+    UUID systemAdmin = user("system_admin@example.com", "Admin123!", "System Admin", "0900000011", "system_admin");
+    UUID financeAdmin = user("finance_admin@example.com", "Admin123!", "Finance Admin", "0900000012", "finance_admin");
+    UUID tutorAdmin = user("tutor_admin@example.com", "Admin123!", "Tutor Admin", "0900000013", "tutor_admin");
+    UUID supportAdmin = user("support_admin@example.com", "Admin123!", "Support Admin", "0900000014", "support_admin");
+    UUID verificationAdmin = user("verification_admin@example.com", "Admin123!", "Verification Admin", "0900000015", "verification_admin");
     UUID student = user("student@example.com", "Student123!", "Nguyễn Minh Anh", "0900000002", "student");
     UUID parent = user("parent@example.com", "Parent123!", "Trần Phụ Huynh", "0900000003", "parent");
     UUID tutorUser = user("tutor@example.com", "Tutor123!", "Lê Gia Sư", "0900000004", "tutor");
     UUID pendingTutorUser = user("tutor_pending@example.com", "Tutor123!", "Phạm Gia Sư Chờ Duyệt", "0900000005", "tutor");
+    UUID needUpdateTutorUser = user("tutor_need_update@example.com", "Tutor123!", "Ngô Gia Sư Cần Bổ Sung", "0900000006", "tutor");
+    UUID suspendedTutorUser = user("tutor_suspended@example.com", "Tutor123!", "Đỗ Gia Sư Tạm Khóa", "0900000007", "tutor");
 
     jdbc.update("insert into student_profiles(user_id, grade_level, school, learning_goals, preferred_learning_mode, province, district) values (?, 'Lop 10', 'THPT Demo', 'Củng cố nền tảng Toán', 'both', 'TP HCM', 'Quận 1')", student);
     jdbc.update("insert into parent_profiles(user_id, relationship_to_student, student_name, student_grade, province, district) values (?, 'Mẹ', 'Trần Minh Khang', 'Lop 8', 'Hà Nội', 'Cầu Giấy')", parent);
+    seedTutorVerificationDocument(student, "student_card", "student-card-approved.pdf", "approved", 8, verificationAdmin, 900);
+    seedTutorVerificationDocument(parent, "student_card", "student-card-need-more-info.pdf", "need_more_info", 42, verificationAdmin, 901);
 
     List<UUID> studentUsers = new ArrayList<>(List.of(student, parent));
     for (int i = 1; i <= 18; i++) {
@@ -62,6 +71,8 @@ public class DataSeeder {
     List<UUID> tutorProfiles = new ArrayList<>();
     tutorProfiles.add(tutor(tutorUser, "approved", "Gia sư Toán luyện thi", "Đại học Bách Khoa", "Toán ứng dụng", 4, 180000, 250000, 4.8, 18, admin, subjects, grades, 0));
     tutorProfiles.add(tutor(pendingTutorUser, "pending", "Gia sư đang chờ duyệt", "Đại học Sư phạm", "Sư phạm Toán", 2, 150000, 220000, 0, 0, null, subjects, grades, 1));
+    tutorProfiles.add(tutor(needUpdateTutorUser, "need_update", "Gia sư cần bổ sung hồ sơ", "Đại học Khoa học Tự nhiên", "Vật lý", 3, 160000, 230000, 0, 0, tutorAdmin, subjects, grades, 2));
+    tutorProfiles.add(tutor(suspendedTutorUser, "suspended", "Gia sư đang bị tạm khóa", "Đại học Ngoại ngữ", "Tiếng Anh", 5, 220000, 320000, 4.1, 9, admin, subjects, grades, 3));
     for (int i = 1; i <= 20; i++) {
       UUID u = user("tutor" + i + "@example.com", "Tutor123!", "Gia sư Demo " + i, "09200000" + String.format("%02d", i), "tutor");
       String status = switch (i % 6) {
@@ -141,6 +152,43 @@ public class DataSeeder {
           "RESOLVED".equals(status) || "REJECTED".equals(status) ? admin : null,
           "RESOLVED".equals(status) || "REJECTED".equals(status) ? OffsetDateTime.now().minusDays(i) : null);
     }
+    String[] complaintStatuses = {"NEW", "ASSIGNED", "INVESTIGATING", "WAITING_PARENT", "PROPOSED_RESOLUTION", "ESCALATED", "CLOSED"};
+    for (int i = 0; i < complaintStatuses.length; i++) {
+      UUID bookingId = bookings.get(i % bookings.size());
+      UUID openedBy = jdbc.queryForObject("select student_id from trial_bookings where id = ?", UUID.class, bookingId);
+      UUID targetUser = tutorOwnerByBooking(bookingId);
+      String status = complaintStatuses[i];
+      boolean terminal = List.of("CLOSED").contains(status);
+      UUID disputeId = jdbc.queryForObject("""
+          insert into booking_disputes(booking_id, opened_by, status, reason, resolution, resolved_by, resolved_at,
+            related_type, related_id, reporter_type, reporter_id, target_user_id, title, description, priority, risk_level,
+            sla_due_at, assigned_admin_id, resolution_type, resolution_note, closed_at)
+          values (?, ?, ?, ?, ?, ?, ?, 'BOOKING', ?, 'PARENT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          returning id
+          """, UUID.class, bookingId, openedBy, status,
+          "Case management demo " + (i + 1) + ": phụ huynh phản ánh lịch học, chất lượng hoặc thanh toán.",
+          terminal ? "Đã thống nhất phương án hỗ trợ, không tự động refund ngoài luồng finance." : null,
+          terminal ? supportAdmin : null,
+          terminal ? OffsetDateTime.now().minusDays(1) : null,
+          bookingId, openedBy, targetUser,
+          "Case demo " + status,
+          "Dữ liệu demo cho trạng thái " + status + " trong màn admin complaints.",
+          i % 3 == 0 ? "HIGH" : "MEDIUM",
+          "ESCALATED".equals(status) ? "CRITICAL" : i % 2 == 0 ? "HIGH" : "MEDIUM",
+          OffsetDateTime.now().plusHours(12 + i * 4),
+          List.of("ASSIGNED", "INVESTIGATING", "WAITING_PARENT", "PROPOSED_RESOLUTION", "ESCALATED", "CLOSED").contains(status) ? supportAdmin : null,
+          terminal ? "NO_ACTION" : null,
+          terminal ? "Đã xử lý theo quy trình complaint, không mutate payment/tutor trực tiếp." : null,
+          terminal ? OffsetDateTime.now().minusHours(6) : null);
+      jdbc.update("""
+          insert into booking_dispute_timeline_events(dispute_id, event_type, status_to, actor_user_id, actor_role, note)
+          values (?, 'seed_case_created', ?, ?, 'support_admin', ?)
+          """, disputeId, status, supportAdmin, "Seed case trạng thái " + status);
+      jdbc.update("""
+          insert into admin_internal_notes(entity_type, entity_id, content, visibility, created_by)
+          values ('booking_dispute', ?, ?, 'INTERNAL_ONLY', ?)
+          """, disputeId, "Ghi chú nội bộ demo: đã gọi xác minh thông tin ban đầu.", supportAdmin);
+    }
 
     List<UUID> classes = new ArrayList<>();
     for (int i = 1; i <= 10; i++) {
@@ -162,6 +210,8 @@ public class DataSeeder {
     }
 
     List<UUID> completedSessions = new ArrayList<>();
+    List<UUID> paidPayments = new ArrayList<>();
+    List<UUID> pendingPayments = new ArrayList<>();
     for (int i = 1; i <= 50; i++) {
       UUID classId = classes.get(i % classes.size());
       ClassInfo info = jdbc.queryForObject("select student_id, tutor_id, hourly_rate from tutoring_classes where id = ?", (rs, row) ->
@@ -183,12 +233,44 @@ public class DataSeeder {
             values (?, ?, ?, ?, ?, ?, ?, ?) returning id
             """, UUID.class, info.studentId(), info.tutorId(), classId, sessionId, info.hourlyRate(), "Thanh toán buổi học #" + i,
             i % 3 == 0 ? "pending" : "paid", i % 3 == 0 ? null : start.plusDays(1));
+        if (i % 3 == 0) {
+          pendingPayments.add(paymentId);
+        } else {
+          paidPayments.add(paymentId);
+        }
         int fee = (int) Math.round(info.hourlyRate() * 0.15);
         jdbc.update("""
             insert into tutor_earnings(tutor_id, session_id, payment_id, gross_amount, platform_fee, net_amount, status)
             values (?, ?, ?, ?, ?, ?, ?)
             """, info.tutorId(), sessionId, paymentId, info.hourlyRate(), fee, info.hourlyRate() - fee, i % 3 == 0 ? "pending" : "available");
       }
+    }
+
+    if (!paidPayments.isEmpty()) {
+      UUID partialRefundPayment = paidPayments.get(0);
+      int amount = jdbc.queryForObject("select amount from payments where id = ?", Integer.class, partialRefundPayment);
+      jdbc.update("""
+          insert into payment_refunds(payment_id, amount, reason, status, gateway_refund_id, requested_by, processed_by)
+          values (?, ?, 'Hoàn một phần do đổi lịch demo', 'succeeded', ?, ?, ?)
+          """, partialRefundPayment, Math.max(1, amount / 2), "seed-refund-partial-" + partialRefundPayment, financeAdmin, financeAdmin);
+      jdbc.update("update payments set status = 'partially_refunded', updated_at = now() where id = ?", partialRefundPayment);
+    }
+    if (paidPayments.size() > 1) {
+      UUID fullRefundPayment = paidPayments.get(1);
+      int amount = jdbc.queryForObject("select amount from payments where id = ?", Integer.class, fullRefundPayment);
+      jdbc.update("""
+          insert into payment_refunds(payment_id, amount, reason, status, gateway_refund_id, requested_by, processed_by)
+          values (?, ?, 'Hoàn toàn bộ do buổi học demo không diễn ra', 'succeeded', ?, ?, ?)
+          """, fullRefundPayment, amount, "seed-refund-full-" + fullRefundPayment, financeAdmin, financeAdmin);
+      jdbc.update("update payments set status = 'refunded', updated_at = now() where id = ?", fullRefundPayment);
+    }
+    if (paidPayments.size() > 2) {
+      UUID pendingRefundPayment = paidPayments.get(2);
+      int amount = jdbc.queryForObject("select amount from payments where id = ?", Integer.class, pendingRefundPayment);
+      jdbc.update("""
+          insert into payment_refunds(payment_id, amount, reason, status, requested_by)
+          values (?, ?, 'Yêu cầu refund đang chờ đối soát demo', 'pending', ?)
+          """, pendingRefundPayment, Math.max(1, amount / 3), supportAdmin);
     }
 
     for (int i = 0; i < Math.min(30, completedSessions.size()); i++) {
@@ -238,6 +320,31 @@ public class DataSeeder {
           values (?, 'admin', ?, ?, ?, '{}'::jsonb)
           """, admin, "seed.action_" + i, "seed", "Audit log demo số " + i);
     }
+    jdbc.update("""
+        insert into audit_logs(actor_id, actor_role, action, entity_type, description, metadata)
+        values
+          (?, 'system_admin', 'seed.system_admin_check', 'settings', 'System admin demo audit.', '{}'::jsonb),
+          (?, 'finance_admin', 'seed.finance_admin_check', 'payment', 'Finance admin demo audit.', '{}'::jsonb),
+          (?, 'tutor_admin', 'seed.tutor_admin_check', 'tutor', 'Tutor admin demo audit.', '{}'::jsonb),
+          (?, 'support_admin', 'seed.support_admin_check', 'complaint', 'Support admin demo audit.', '{}'::jsonb),
+          (?, 'verification_admin', 'seed.verification_admin_check', 'verification', 'Verification admin demo audit.', '{}'::jsonb)
+        """, systemAdmin, financeAdmin, tutorAdmin, supportAdmin, verificationAdmin);
+    jdbc.update("""
+        insert into admin_internal_notes(entity_type, entity_id, content, visibility, created_by)
+        values
+          ('user', ?, 'CRM note demo: phụ huynh cần ưu tiên liên hệ buổi tối.', 'INTERNAL_ONLY', ?),
+          ('user', ?, 'CRM note demo: học viên đang ôn gấp, cần gia sư phản hồi nhanh.', 'INTERNAL_ONLY', ?),
+          ('tutor', ?, 'CRM note demo: tutor có lịch sử rating tốt nhưng cần theo dõi response rate.', 'INTERNAL_ONLY', ?),
+          ('tutor', ?, 'CRM note demo: hồ sơ tạm khóa để kiểm tra chất lượng.', 'INTERNAL_ONLY', ?)
+        """, parent, supportAdmin, student, supportAdmin, tutorProfiles.get(0), tutorAdmin, tutorProfiles.get(3), tutorAdmin);
+    jdbc.update("""
+        insert into admin_risk_flags(entity_type, entity_id, level, reason, note, created_by)
+        values
+          ('USER', ?, 'HIGH', 'PAYMENT_REVIEW', 'Có refund đang chờ đối soát trong seed demo.', ?),
+          ('USER', ?, 'MEDIUM', 'FAST_MATCH_REQUIRED', 'Cần ưu tiên matching do mục tiêu học gấp.', ?),
+          ('TUTOR', ?, 'MEDIUM', 'RESPONSE_RATE_WATCH', 'Theo dõi tỷ lệ phản hồi trong 7 ngày.', ?),
+          ('TUTOR', ?, 'CRITICAL', 'QUALITY_REVIEW', 'Tutor đang bị tạm khóa, cần review trước khi mở lại.', ?)
+        """, parent, financeAdmin, student, supportAdmin, tutorProfiles.get(0), tutorAdmin, tutorProfiles.get(3), tutorAdmin);
   }
 
   private UUID user(String email, String password, String fullName, String phone, String role) {
@@ -360,6 +467,15 @@ public class DataSeeder {
 
   private UUID tutorUserId(UUID tutorId) {
     return jdbc.queryForObject("select user_id from tutor_profiles where id = ?", UUID.class, tutorId);
+  }
+
+  private UUID tutorOwnerByBooking(UUID bookingId) {
+    return jdbc.queryForObject("""
+        select tp.user_id
+        from trial_bookings tb
+        join tutor_profiles tp on tp.id = tb.tutor_id
+        where tb.id = ?
+        """, UUID.class, bookingId);
   }
 
   private String subjectName(UUID subjectId) {

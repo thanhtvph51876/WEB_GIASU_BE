@@ -42,6 +42,8 @@ public class PermissionService {
           "matching.manage",
           "bookings.*",
           "classes.*",
+          "sessions.*",
+          "crm.manage",
           "reports.read",
           "operations.read"
       )),
@@ -50,10 +52,13 @@ public class PermissionService {
           "learning_requests.read",
           "bookings.read",
           "classes.read",
+          "sessions.read",
           "conversations.read",
           "notifications.*",
           "contact_requests.manage",
           "reviews.read",
+          "complaints.manage",
+          "crm.manage",
           "reports.read",
           "operations.read"
       )),

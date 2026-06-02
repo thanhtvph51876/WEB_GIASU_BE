@@ -24,6 +24,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import java.io.IOException;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -34,6 +36,7 @@ import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -234,6 +237,30 @@ public class PlatformController {
   @GetMapping("/admin/users/{userId}")
   public ApiResponse<Map<String, Object>> adminUser(@PathVariable UUID userId) {
     return ApiResponse.ok(db.userById(userId).orElseThrow(() -> new NotFoundException("Không tìm thấy người dùng.")));
+  }
+
+  @GetMapping("/admin/users/{userId}/crm")
+  public ApiResponse<Map<String, Object>> adminUserCrm(@PathVariable UUID userId) {
+    return ApiResponse.ok(userCrm(userId));
+  }
+
+  @PostMapping("/admin/users/{userId}/notes")
+  public ApiResponse<Map<String, Object>> addUserCrmNote(@PathVariable UUID userId, @RequestBody Map<String, Object> body) {
+    db.userById(userId).orElseThrow(() -> new NotFoundException("Không tìm thấy người dùng."));
+    return ApiResponse.ok(addCrmNote("user", userId, body), "Đã thêm ghi chú nội bộ.");
+  }
+
+  @PostMapping("/admin/users/{userId}/risk-flags")
+  public ApiResponse<Map<String, Object>> addUserRiskFlag(@PathVariable UUID userId, @RequestBody Map<String, Object> body) {
+    db.userById(userId).orElseThrow(() -> new NotFoundException("Không tìm thấy người dùng."));
+    return ApiResponse.ok(addRiskFlag("USER", userId, body), "Đã gắn cờ rủi ro.");
+  }
+
+  @DeleteMapping("/admin/users/{userId}/risk-flags/{flagId}")
+  public ApiResponse<Map<String, Object>> resolveUserRiskFlag(@PathVariable UUID userId, @PathVariable UUID flagId) {
+    db.userById(userId).orElseThrow(() -> new NotFoundException("Không tìm thấy người dùng."));
+    resolveRiskFlag("USER", userId, flagId);
+    return ApiResponse.ok(Map.of("resolved", true), "Đã xử lý cờ rủi ro.");
   }
 
   @PatchMapping("/admin/users/{userId}/status")
@@ -503,6 +530,30 @@ public class PlatformController {
   @GetMapping("/admin/tutors/{tutorId}")
   public ApiResponse<Map<String, Object>> adminTutor(@PathVariable UUID tutorId) {
     return ApiResponse.ok(db.tutorById(tutorId, true));
+  }
+
+  @GetMapping("/admin/tutors/{tutorId}/crm")
+  public ApiResponse<Map<String, Object>> adminTutorCrm(@PathVariable UUID tutorId) {
+    return ApiResponse.ok(tutorCrm(tutorId));
+  }
+
+  @PostMapping("/admin/tutors/{tutorId}/notes")
+  public ApiResponse<Map<String, Object>> addTutorCrmNote(@PathVariable UUID tutorId, @RequestBody Map<String, Object> body) {
+    db.tutorById(tutorId, true);
+    return ApiResponse.ok(addCrmNote("tutor", tutorId, body), "Đã thêm ghi chú nội bộ.");
+  }
+
+  @PostMapping("/admin/tutors/{tutorId}/risk-flags")
+  public ApiResponse<Map<String, Object>> addTutorRiskFlag(@PathVariable UUID tutorId, @RequestBody Map<String, Object> body) {
+    db.tutorById(tutorId, true);
+    return ApiResponse.ok(addRiskFlag("TUTOR", tutorId, body), "Đã gắn cờ rủi ro.");
+  }
+
+  @DeleteMapping("/admin/tutors/{tutorId}/risk-flags/{flagId}")
+  public ApiResponse<Map<String, Object>> resolveTutorRiskFlag(@PathVariable UUID tutorId, @PathVariable UUID flagId) {
+    db.tutorById(tutorId, true);
+    resolveRiskFlag("TUTOR", tutorId, flagId);
+    return ApiResponse.ok(Map.of("resolved", true), "Đã xử lý cờ rủi ro.");
   }
 
   @GetMapping("/admin/tutors/{tutorId}/approval-eligibility")
@@ -1270,6 +1321,440 @@ public class PlatformController {
       @RequestParam(defaultValue = "general") String purpose
   ) throws IOException {
     return ApiResponse.ok(uploadService.upload(file, visibility, purpose));
+  }
+
+  private Map<String, Object> userCrm(UUID userId) {
+    Map<String, Object> user = db.userById(userId).orElseThrow(() -> new NotFoundException("Không tìm thấy người dùng."));
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("user", user);
+    data.put("profile", userProfileOrNull(userId, user.get("role").toString()));
+    data.put("summary", userCrmSummary(userId));
+    data.put("learningRequests", db.learningRequests(" where lr.requester_id = ? ", userId));
+    data.put("bookings", db.bookings(" where tb.student_id = ? ", userId));
+    data.put("classes", db.classes(" where tc.student_id = ? ", userId));
+    data.put("sessions", db.sessions(" where cs.student_id = ? ", userId));
+    data.put("payments", jdbc.query("select * from payments where user_id = ? order by created_at desc limit 100", db.paymentMapper(), userId));
+    data.put("refunds", crmRefunds(" where p.user_id = ? ", userId));
+    data.put("complaints", crmComplaintsForUser(userId));
+    data.put("reviews", db.reviews(" where r.reviewer_id = ? ", userId));
+    data.put("conversations", crmConversations(userId));
+    data.put("notes", crmNotes("user", userId));
+    data.put("riskFlags", riskFlagsForUser(userId, user));
+    data.put("auditLogs", crmAudit("user", userId));
+    return data;
+  }
+
+  private Map<String, Object> tutorCrm(UUID tutorId) {
+    Map<String, Object> tutor = db.tutorById(tutorId, true);
+    UUID tutorUserId = uuid(tutor.get("userId"));
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("user", db.userById(tutorUserId).orElseThrow(() -> new NotFoundException("Không tìm thấy user của gia sư.")));
+    data.put("tutor", tutor);
+    data.put("summary", tutorCrmSummary(tutorId));
+    data.put("approvalEligibility", tutorApprovalEligibilityService.checkTutorApprovalEligibility(tutorId));
+    data.put("verifications", crmVerifications(tutorUserId));
+    data.put("learningRequests", db.learningRequests(" where lr.assigned_tutor_id = ? ", tutorId));
+    data.put("bookings", db.bookings(" where tb.tutor_id = ? ", tutorId));
+    data.put("classes", db.classes(" where tc.tutor_id = ? ", tutorId));
+    data.put("sessions", db.sessions(" where cs.tutor_id = ? ", tutorId));
+    data.put("payments", jdbc.query("select * from payments where tutor_id = ? order by created_at desc limit 100", db.paymentMapper(), tutorId));
+    data.put("refunds", crmRefunds(" where p.tutor_id = ? ", tutorId));
+    data.put("earnings", jdbc.query("select * from tutor_earnings where tutor_id = ? order by created_at desc limit 100", db.earningMapper(), tutorId));
+    data.put("payouts", jdbc.query("""
+        select p.*, u.full_name tutor_name
+        from payouts p
+        join tutor_profiles tp on tp.id = p.tutor_id
+        join users u on u.id = tp.user_id
+        where p.tutor_id = ?
+        order by p.created_at desc
+        limit 100
+        """, db.payoutMapper(), tutorId));
+    data.put("reviews", db.reviews(" where r.tutor_id = ? ", tutorId));
+    data.put("complaints", crmComplaintsForTutor(tutorId));
+    data.put("conversations", crmConversations(tutorUserId));
+    data.put("notes", crmNotes("tutor", tutorId));
+    data.put("riskFlags", riskFlagsForTutor(tutorId, tutor));
+    data.put("auditLogs", crmAudit("tutor", tutorId));
+    return data;
+  }
+
+  private Map<String, Object> userProfileOrNull(UUID userId, String role) {
+    if ("parent".equals(role)) {
+      return db.optional("select * from parent_profiles where user_id = ?", parentProfileMapper(), userId).orElse(null);
+    }
+    if ("student".equals(role)) {
+      return db.optional("select * from student_profiles where user_id = ?", studentProfileMapper(), userId).orElse(null);
+    }
+    return null;
+  }
+
+  private Map<String, Object> userCrmSummary(UUID userId) {
+    Map<String, Object> summary = new LinkedHashMap<>();
+    summary.put("learningRequests", countSql("select count(*) from learning_requests where requester_id = ?", userId));
+    summary.put("bookings", countSql("select count(*) from trial_bookings where student_id = ?", userId));
+    summary.put("activeClasses", countSql("select count(*) from tutoring_classes where student_id = ? and status in ('trial','active','paused')", userId));
+    summary.put("completedSessions", countSql("select count(*) from class_sessions where student_id = ? and status = 'completed'", userId));
+    summary.put("paidAmount", moneySql("select coalesce(sum(amount),0) from payments where user_id = ? and status in ('paid','completed','partially_refunded')", userId));
+    summary.put("openComplaints", countSql("""
+        select count(*)
+        from booking_disputes bd
+        left join trial_bookings tb on tb.id = bd.booking_id
+        where (bd.opened_by = ? or bd.reporter_id = ? or bd.target_user_id = ? or tb.student_id = ?)
+          and bd.status not in ('RESOLVED','CLOSED','REJECTED')
+        """, userId, userId, userId, userId));
+    return summary;
+  }
+
+  private Map<String, Object> tutorCrmSummary(UUID tutorId) {
+    Map<String, Object> summary = new LinkedHashMap<>();
+    summary.put("assignedRequests", countSql("select count(*) from learning_requests where assigned_tutor_id = ?", tutorId));
+    summary.put("bookings", countSql("select count(*) from trial_bookings where tutor_id = ?", tutorId));
+    summary.put("activeClasses", countSql("select count(*) from tutoring_classes where tutor_id = ? and status in ('trial','active','paused')", tutorId));
+    summary.put("completedSessions", countSql("select count(*) from class_sessions where tutor_id = ? and status = 'completed'", tutorId));
+    summary.put("paidAmount", moneySql("select coalesce(sum(amount),0) from payments where tutor_id = ? and status in ('paid','completed','partially_refunded')", tutorId));
+    summary.put("pendingPayouts", countSql("select count(*) from payouts where tutor_id = ? and status in ('pending','processing','approved')", tutorId));
+    summary.put("openComplaints", countSql("""
+        select count(*)
+        from booking_disputes bd
+        join trial_bookings tb on tb.id = bd.booking_id
+        where tb.tutor_id = ? and bd.status not in ('RESOLVED','CLOSED','REJECTED')
+        """, tutorId));
+    return summary;
+  }
+
+  private List<Map<String, Object>> crmRefunds(String where, Object... args) {
+    return jdbc.query("""
+        select pr.*, p.user_id, p.tutor_id, p.status payment_status, p.amount payment_amount
+        from payment_refunds pr
+        join payments p on p.id = pr.payment_id
+        """ + where + " order by pr.created_at desc limit 100", refundCrmMapper(), args);
+  }
+
+  private List<Map<String, Object>> crmComplaintsForUser(UUID userId) {
+    return jdbc.query("""
+        select bd.*, assignee.full_name assigned_admin_name
+        from booking_disputes bd
+        left join trial_bookings tb on tb.id = bd.booking_id
+        left join users assignee on assignee.id = bd.assigned_admin_id
+        where bd.opened_by = ? or bd.reporter_id = ? or bd.target_user_id = ? or tb.student_id = ?
+        order by bd.created_at desc
+        limit 100
+        """, complaintCrmMapper(), userId, userId, userId, userId);
+  }
+
+  private List<Map<String, Object>> crmComplaintsForTutor(UUID tutorId) {
+    return jdbc.query("""
+        select bd.*, assignee.full_name assigned_admin_name
+        from booking_disputes bd
+        join trial_bookings tb on tb.id = bd.booking_id
+        left join users assignee on assignee.id = bd.assigned_admin_id
+        where tb.tutor_id = ?
+        order by bd.created_at desc
+        limit 100
+        """, complaintCrmMapper(), tutorId);
+  }
+
+  private List<Map<String, Object>> crmConversations(UUID userId) {
+    return jdbc.query("""
+        select c.id, c.title, c.type, c.created_at, c.updated_at,
+          (select m.content from messages m where m.conversation_id = c.id order by m.created_at desc limit 1) last_message,
+          (select max(m.created_at) from messages m where m.conversation_id = c.id) last_message_at,
+          (select string_agg(u.full_name, '||' order by u.full_name)
+             from conversation_members cm2 join users u on u.id = cm2.user_id
+            where cm2.conversation_id = c.id) participant_names
+        from conversations c
+        join conversation_members cm on cm.conversation_id = c.id
+        where cm.user_id = ?
+        order by coalesce((select max(m.created_at) from messages m where m.conversation_id = c.id), c.updated_at, c.created_at) desc
+        limit 50
+        """, conversationCrmMapper(), userId);
+  }
+
+  private List<Map<String, Object>> crmVerifications(UUID userId) {
+    return jdbc.query("""
+        select uv.*, reviewer.full_name reviewer_name
+        from user_verifications uv
+        left join users reviewer on reviewer.id = uv.reviewed_by
+        where uv.user_id = ?
+        order by uv.created_at desc
+        limit 100
+        """, verificationCrmMapper(), userId);
+  }
+
+  private List<Map<String, Object>> crmNotes(String entityType, UUID entityId) {
+    return jdbc.query("""
+        select n.*, u.full_name created_by_name
+        from admin_internal_notes n
+        left join users u on u.id = n.created_by
+        where lower(n.entity_type) = lower(?) and n.entity_id = ?
+        order by n.created_at desc
+        limit 100
+        """, noteCrmMapper(), entityType, entityId);
+  }
+
+  private List<Map<String, Object>> crmAudit(String entityType, UUID entityId) {
+    return jdbc.query("""
+        select *
+        from audit_logs
+        where lower(entity_type) = lower(?) and entity_id = ?
+        order by created_at desc
+        limit 50
+        """, db.auditMapper(), entityType, entityId);
+  }
+
+  private Map<String, Object> addCrmNote(String entityType, UUID entityId, Map<String, Object> body) {
+    String content = firstString(body, "content", "note", "reason");
+    if (content == null || content.isBlank()) throw new BusinessException("NOTE_REQUIRED", "Cần nhập nội dung ghi chú.");
+    UUID noteId = jdbc.queryForObject("""
+        insert into admin_internal_notes(entity_type, entity_id, content, visibility, created_by)
+        values (?, ?, ?, 'INTERNAL_ONLY', ?)
+        returning id
+        """, UUID.class, entityType, entityId, content, db.currentUserIdOrThrow());
+    db.auditCurrent("admin.crm_note_create", entityType, entityId, "Admin thêm ghi chú nội bộ CRM.");
+    return crmNotes(entityType, entityId).stream()
+        .filter(note -> noteId.toString().equals(note.get("id")))
+        .findFirst()
+        .orElseGet(() -> Map.of("id", noteId.toString(), "content", content));
+  }
+
+  private Map<String, Object> addRiskFlag(String entityType, UUID entityId, Map<String, Object> body) {
+    String level = valueOr(firstString(body, "level"), "MEDIUM").toUpperCase();
+    if (!List.of("LOW", "MEDIUM", "HIGH", "CRITICAL").contains(level)) {
+      throw new BusinessException("INVALID_RISK_LEVEL", "Mức rủi ro không hợp lệ.");
+    }
+    String reason = valueOr(firstString(body, "reason"), "MANUAL_REVIEW").toUpperCase();
+    String note = firstString(body, "note", "content");
+    UUID flagId = jdbc.queryForObject("""
+        insert into admin_risk_flags(entity_type, entity_id, level, reason, note, created_by)
+        values (?, ?, ?, ?, ?, ?)
+        returning id
+        """, UUID.class, entityType.toUpperCase(), entityId, level, reason, note, db.currentUserIdOrThrow());
+    db.auditCurrent("admin.risk_flag_create", entityType.toLowerCase(), entityId, "Admin gắn cờ rủi ro CRM: " + reason + ".");
+    return persistedRiskFlags(entityType, entityId).stream()
+        .filter(flag -> flagId.toString().equals(flag.get("id")))
+        .findFirst()
+        .orElseGet(() -> riskFlag(flagId.toString(), entityType, entityId, level, reason, note, true, "manual"));
+  }
+
+  private void resolveRiskFlag(String entityType, UUID entityId, UUID flagId) {
+    int updated = jdbc.update("""
+        update admin_risk_flags
+        set active = false, resolved_by = ?, resolved_at = now(), updated_at = now()
+        where id = ? and entity_type = ? and entity_id = ? and active = true
+        """, db.currentUserIdOrThrow(), flagId, entityType.toUpperCase(), entityId);
+    if (updated == 0) throw new NotFoundException("Không tìm thấy cờ rủi ro đang hoạt động.");
+    db.auditCurrent("admin.risk_flag_resolve", entityType.toLowerCase(), entityId, "Admin xử lý cờ rủi ro CRM.");
+  }
+
+  private List<Map<String, Object>> riskFlagsForUser(UUID userId, Map<String, Object> user) {
+    List<Map<String, Object>> flags = new ArrayList<>(persistedRiskFlags("USER", userId));
+    if (!"active".equals(user.get("status"))) {
+      flags.add(riskFlag("derived-user-status", "USER", userId, "HIGH", "USER_INACTIVE", "Tài khoản không active, cần kiểm tra trước khi mở luồng mới.", true, "derived"));
+    }
+    long openComplaints = countSql("""
+        select count(*)
+        from booking_disputes bd
+        left join trial_bookings tb on tb.id = bd.booking_id
+        where (bd.opened_by = ? or bd.reporter_id = ? or bd.target_user_id = ? or tb.student_id = ?)
+          and bd.status not in ('RESOLVED','CLOSED','REJECTED')
+        """, userId, userId, userId, userId);
+    if (openComplaints > 0) {
+      flags.add(riskFlag("derived-open-complaints", "USER", userId, openComplaints > 2 ? "HIGH" : "MEDIUM", "OPEN_COMPLAINTS", "Có " + openComplaints + " complaint chưa đóng.", true, "derived"));
+    }
+    long pendingRefunds = countSql("""
+        select count(*)
+        from payment_refunds pr
+        join payments p on p.id = pr.payment_id
+        where p.user_id = ? and pr.status in ('pending','processing')
+        """, userId);
+    if (pendingRefunds > 0) {
+      flags.add(riskFlag("derived-pending-refunds", "USER", userId, "MEDIUM", "PENDING_REFUNDS", "Có " + pendingRefunds + " refund đang chờ xử lý.", true, "derived"));
+    }
+    return flags;
+  }
+
+  private List<Map<String, Object>> riskFlagsForTutor(UUID tutorId, Map<String, Object> tutor) {
+    List<Map<String, Object>> flags = new ArrayList<>(persistedRiskFlags("TUTOR", tutorId));
+    String status = tutor.get("status") == null ? "" : tutor.get("status").toString();
+    if ("suspended".equals(status) || "rejected".equals(status)) {
+      flags.add(riskFlag("derived-tutor-status", "TUTOR", tutorId, "CRITICAL", "TUTOR_STATUS_" + status.toUpperCase(), "Hồ sơ tutor đang ở trạng thái cần kiểm soát.", true, "derived"));
+    }
+    long openComplaints = countSql("""
+        select count(*)
+        from booking_disputes bd
+        join trial_bookings tb on tb.id = bd.booking_id
+        where tb.tutor_id = ? and bd.status not in ('RESOLVED','CLOSED','REJECTED')
+        """, tutorId);
+    if (openComplaints > 0) {
+      flags.add(riskFlag("derived-tutor-complaints", "TUTOR", tutorId, openComplaints > 2 ? "HIGH" : "MEDIUM", "OPEN_COMPLAINTS", "Tutor có " + openComplaints + " complaint chưa đóng.", true, "derived"));
+    }
+    Number rating = tutor.get("rating") instanceof Number n ? n : 0;
+    if (rating.doubleValue() > 0 && rating.doubleValue() < 4) {
+      flags.add(riskFlag("derived-low-rating", "TUTOR", tutorId, "MEDIUM", "LOW_RATING", "Rating trung bình dưới 4.0.", true, "derived"));
+    }
+    return flags;
+  }
+
+  private List<Map<String, Object>> persistedRiskFlags(String entityType, UUID entityId) {
+    return jdbc.query("""
+        select f.*, u.full_name created_by_name, resolver.full_name resolved_by_name
+        from admin_risk_flags f
+        left join users u on u.id = f.created_by
+        left join users resolver on resolver.id = f.resolved_by
+        where f.entity_type = ? and f.entity_id = ?
+        order by f.active desc, f.created_at desc
+        limit 100
+        """, riskFlagMapper(), entityType.toUpperCase(), entityId);
+  }
+
+  private Map<String, Object> riskFlag(String id, String entityType, UUID entityId, String level, String reason, String note, boolean active, String source) {
+    Map<String, Object> flag = new LinkedHashMap<>();
+    flag.put("id", id);
+    flag.put("entityType", entityType);
+    flag.put("entityId", entityId.toString());
+    flag.put("level", level);
+    flag.put("reason", reason);
+    flag.put("note", note);
+    flag.put("active", active);
+    flag.put("source", source);
+    return flag;
+  }
+
+  private RowMapper<Map<String, Object>> refundCrmMapper() {
+    return (rs, row) -> {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", rs.getObject("id").toString());
+      m.put("paymentId", rs.getObject("payment_id").toString());
+      m.put("userId", rs.getObject("user_id") == null ? null : rs.getObject("user_id").toString());
+      m.put("tutorId", rs.getObject("tutor_id") == null ? null : rs.getObject("tutor_id").toString());
+      m.put("amount", rs.getInt("amount"));
+      m.put("paymentAmount", rs.getInt("payment_amount"));
+      m.put("reason", rs.getString("reason"));
+      m.put("status", rs.getString("status"));
+      m.put("paymentStatus", rs.getString("payment_status"));
+      m.put("gatewayRefundId", rs.getString("gateway_refund_id"));
+      m.put("requestedBy", idOrNull(rs, "requested_by"));
+      m.put("processedBy", idOrNull(rs, "processed_by"));
+      m.put("createdAt", ts(rs, "created_at"));
+      m.put("updatedAt", ts(rs, "updated_at"));
+      return m;
+    };
+  }
+
+  private RowMapper<Map<String, Object>> complaintCrmMapper() {
+    return (rs, row) -> {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", rs.getObject("id").toString());
+      m.put("bookingId", idOrNull(rs, "booking_id"));
+      m.put("status", rs.getString("status"));
+      m.put("title", valueOr(rs.getString("title"), rs.getString("reason")));
+      m.put("description", valueOr(rs.getString("description"), rs.getString("reason")));
+      m.put("reason", rs.getString("reason"));
+      m.put("priority", rs.getString("priority"));
+      m.put("riskLevel", rs.getString("risk_level"));
+      m.put("slaDueAt", ts(rs, "sla_due_at"));
+      m.put("assignedAdminId", idOrNull(rs, "assigned_admin_id"));
+      m.put("assignedAdminName", rs.getString("assigned_admin_name"));
+      m.put("resolutionType", rs.getString("resolution_type"));
+      m.put("resolutionNote", valueOr(rs.getString("resolution_note"), rs.getString("resolution")));
+      m.put("closedAt", ts(rs, "closed_at"));
+      m.put("createdAt", ts(rs, "created_at"));
+      m.put("updatedAt", ts(rs, "updated_at"));
+      return m;
+    };
+  }
+
+  private RowMapper<Map<String, Object>> conversationCrmMapper() {
+    return (rs, row) -> {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", rs.getObject("id").toString());
+      m.put("title", rs.getString("title"));
+      m.put("type", rs.getString("type"));
+      m.put("participantNames", splitPipe(rs.getString("participant_names")));
+      m.put("lastMessage", rs.getString("last_message"));
+      m.put("lastMessageAt", ts(rs, "last_message_at"));
+      m.put("createdAt", ts(rs, "created_at"));
+      m.put("updatedAt", ts(rs, "updated_at"));
+      return m;
+    };
+  }
+
+  private RowMapper<Map<String, Object>> verificationCrmMapper() {
+    return (rs, row) -> {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", rs.getObject("id").toString());
+      m.put("userId", rs.getObject("user_id").toString());
+      m.put("verificationType", rs.getString("verification_type"));
+      m.put("schoolName", rs.getString("school_name"));
+      m.put("studentCode", rs.getString("student_code"));
+      m.put("fullNameInput", rs.getString("full_name_input"));
+      m.put("emailVerified", rs.getBoolean("email_verified"));
+      m.put("duplicateFile", rs.getBoolean("duplicate_file"));
+      m.put("riskScore", rs.getInt("risk_score"));
+      m.put("status", rs.getString("status"));
+      m.put("rejectReason", rs.getString("reject_reason"));
+      m.put("reviewedBy", idOrNull(rs, "reviewed_by"));
+      m.put("reviewerName", rs.getString("reviewer_name"));
+      m.put("reviewedAt", ts(rs, "reviewed_at"));
+      m.put("createdAt", ts(rs, "created_at"));
+      m.put("updatedAt", ts(rs, "updated_at"));
+      return m;
+    };
+  }
+
+  private RowMapper<Map<String, Object>> noteCrmMapper() {
+    return (rs, row) -> {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", rs.getObject("id").toString());
+      m.put("entityType", rs.getString("entity_type"));
+      m.put("entityId", rs.getObject("entity_id").toString());
+      m.put("content", rs.getString("content"));
+      m.put("visibility", rs.getString("visibility"));
+      m.put("createdBy", idOrNull(rs, "created_by"));
+      m.put("createdByName", rs.getString("created_by_name"));
+      m.put("createdAt", ts(rs, "created_at"));
+      m.put("updatedAt", ts(rs, "updated_at"));
+      return m;
+    };
+  }
+
+  private RowMapper<Map<String, Object>> riskFlagMapper() {
+    return (rs, row) -> {
+      Map<String, Object> m = riskFlag(rs.getObject("id").toString(), rs.getString("entity_type"),
+          rs.getObject("entity_id", UUID.class), rs.getString("level"), rs.getString("reason"), rs.getString("note"),
+          rs.getBoolean("active"), "manual");
+      m.put("createdBy", idOrNull(rs, "created_by"));
+      m.put("createdByName", rs.getString("created_by_name"));
+      m.put("resolvedBy", idOrNull(rs, "resolved_by"));
+      m.put("resolvedByName", rs.getString("resolved_by_name"));
+      m.put("resolvedAt", ts(rs, "resolved_at"));
+      m.put("createdAt", ts(rs, "created_at"));
+      m.put("updatedAt", ts(rs, "updated_at"));
+      return m;
+    };
+  }
+
+  private String idOrNull(ResultSet rs, String column) throws SQLException {
+    Object value = rs.getObject(column);
+    return value == null ? null : value.toString();
+  }
+
+  private String ts(ResultSet rs, String column) throws SQLException {
+    Object value = rs.getObject(column);
+    return value == null ? null : rs.getObject(column, OffsetDateTime.class).toString();
+  }
+
+  private int moneySql(String sql, Object... args) {
+    Number value = jdbc.queryForObject(sql, Number.class, args);
+    return value == null ? 0 : value.intValue();
+  }
+
+  private List<String> splitPipe(String value) {
+    if (value == null || value.isBlank()) return List.of();
+    return java.util.Arrays.stream(value.split("\\|\\|"))
+        .map(String::trim)
+        .filter(item -> !item.isBlank())
+        .toList();
   }
 
   private ApiResponse<Map<String, Object>> updateTutorStatus(UUID tutorId, String status, String reason) {

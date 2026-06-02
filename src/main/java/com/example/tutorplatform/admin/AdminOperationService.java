@@ -3,14 +3,18 @@ package com.example.tutorplatform.admin;
 import com.example.tutorplatform.db.DbService;
 import com.example.tutorplatform.common.BusinessException;
 import com.example.tutorplatform.common.NotFoundException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
@@ -20,12 +24,48 @@ import org.springframework.stereotype.Service;
 @Service
 public class AdminOperationService {
   private static final Duration CACHE_TTL = Duration.ofSeconds(20);
+  private static final List<String> DISPUTE_STATUSES = List.of(
+      "NEW",
+      "ASSIGNED",
+      "INVESTIGATING",
+      "WAITING_PARENT",
+      "WAITING_TUTOR",
+      "PROPOSED_RESOLUTION",
+      "RESOLVED",
+      "CLOSED",
+      "ESCALATED",
+      "REJECTED"
+  );
+  private static final Map<String, Set<String>> DISPUTE_TRANSITIONS = Map.ofEntries(
+      Map.entry("NEW", Set.of("ASSIGNED", "INVESTIGATING", "ESCALATED", "REJECTED")),
+      Map.entry("ASSIGNED", Set.of("INVESTIGATING", "WAITING_PARENT", "WAITING_TUTOR", "PROPOSED_RESOLUTION", "ESCALATED", "REJECTED")),
+      Map.entry("INVESTIGATING", Set.of("WAITING_PARENT", "WAITING_TUTOR", "PROPOSED_RESOLUTION", "RESOLVED", "ESCALATED", "REJECTED")),
+      Map.entry("WAITING_PARENT", Set.of("INVESTIGATING", "PROPOSED_RESOLUTION", "ESCALATED", "REJECTED")),
+      Map.entry("WAITING_TUTOR", Set.of("INVESTIGATING", "PROPOSED_RESOLUTION", "ESCALATED", "REJECTED")),
+      Map.entry("PROPOSED_RESOLUTION", Set.of("INVESTIGATING", "RESOLVED", "ESCALATED", "REJECTED")),
+      Map.entry("RESOLVED", Set.of("CLOSED", "ESCALATED")),
+      Map.entry("ESCALATED", Set.of("INVESTIGATING", "PROPOSED_RESOLUTION", "RESOLVED", "REJECTED")),
+      Map.entry("REJECTED", Set.of("CLOSED"))
+  );
+  private static final Set<String> DISPUTE_RESOLUTION_TYPES = Set.of(
+      "NO_ACTION",
+      "WARNING",
+      "REFUND",
+      "PARTIAL_REFUND",
+      "COMPENSATION",
+      "TUTOR_SUSPENDED",
+      "BOOKING_CANCELLED",
+      "CLASS_CANCELLED",
+      "OTHER"
+  );
   private final JdbcTemplate jdbc;
   private final DbService db;
+  private final ObjectMapper objectMapper;
   private final Map<String, CacheEntry<?>> cache = new ConcurrentHashMap<>();
 
-  public AdminOperationService(DbService db) {
+  public AdminOperationService(DbService db, ObjectMapper objectMapper) {
     this.db = db;
+    this.objectMapper = objectMapper;
     this.jdbc = db.jdbc();
   }
 
@@ -127,19 +167,244 @@ public class AdminOperationService {
         """));
   }
 
+  public List<Map<String, Object>> workItems() {
+    return cached("workItems", () -> {
+      List<Map<String, Object>> items = new ArrayList<>();
+      addWorkItems(items, """
+          select tp.id, 'tutors' module, 'TUTOR_PENDING_APPROVAL' item_type,
+            coalesce(u.full_name, u.email, 'Tutor ' || tp.id::text) title, tp.status,
+            case when tp.created_at < now() - interval '48 hours' then 'CRITICAL'
+                 when tp.created_at < now() - interval '24 hours' then 'HIGH'
+                 else 'MEDIUM' end priority,
+            case when tp.status in ('need_update','needs_more_documents') then 'HIGH' else 'MEDIUM' end risk_level,
+            tp.created_at + interval '24 hours' sla_due_at,
+            (tp.created_at + interval '24 hours') < now() overdue,
+            'Duyệt hồ sơ gia sư hoặc yêu cầu bổ sung.' recommended_action,
+            concat('/admin/tutors/', tp.id::text) detail_href,
+            null::text assigned_admin,
+            tp.created_at, tp.updated_at, 'TUTOR' related_type, tp.id related_id
+          from tutor_profiles tp join users u on u.id = tp.user_id
+          where tp.status in ('submitted','pending','pending_verification','verified','need_update','needs_more_documents')
+          order by tp.created_at asc limit 100
+          """);
+      addWorkItems(items, """
+          select uv.id, 'verifications' module, 'VERIFICATION_PENDING' item_type,
+            coalesce(u.full_name, u.email, 'Verification ' || uv.id::text) title, uv.status,
+            case when uv.duplicate_file = true or uv.risk_score >= 70 then 'CRITICAL'
+                 when uv.created_at < now() - interval '24 hours' then 'HIGH'
+                 else 'MEDIUM' end priority,
+            case when uv.duplicate_file = true or uv.risk_score >= 70 then 'CRITICAL'
+                 when uv.risk_score >= 40 then 'HIGH'
+                 else 'MEDIUM' end risk_level,
+            uv.created_at + interval '24 hours' sla_due_at,
+            (uv.created_at + interval '24 hours') < now() overdue,
+            'Review giấy tờ xác minh và xử lý rủi ro trùng file/risk score.' recommended_action,
+            concat('/admin/verifications?id=', uv.id::text) detail_href,
+            null::text assigned_admin,
+            uv.created_at, uv.updated_at, 'USER' related_type, uv.user_id related_id
+          from user_verifications uv join users u on u.id = uv.user_id
+          where uv.status in ('pending_review','need_more_info') or uv.duplicate_file = true or uv.risk_score >= 70
+          order by uv.risk_score desc, uv.created_at asc limit 100
+          """);
+      addWorkItems(items, """
+          select lr.id, 'learningRequests' module, 'LEARNING_REQUEST_UNMATCHED' item_type,
+            coalesce(lr.request_code, lr.student_name, 'Learning request ' || lr.id::text) title, lr.status,
+            case when lr.created_at < now() - interval '24 hours' then 'CRITICAL'
+                 when lr.created_at < now() - interval '12 hours' then 'HIGH'
+                 else 'MEDIUM' end priority,
+            case when lr.created_at < now() - interval '12 hours' then 'HIGH' else 'MEDIUM' end risk_level,
+            lr.created_at + interval '12 hours' sla_due_at,
+            (lr.created_at + interval '12 hours') < now() overdue,
+            'Tìm gia sư phù hợp và assign hoặc chuyển sang rematch.' recommended_action,
+            concat('/admin/requests/', lr.id::text) detail_href,
+            null::text assigned_admin,
+            lr.created_at, lr.updated_at, 'LEARNING_REQUEST' related_type, lr.id related_id
+          from learning_requests lr
+          where lr.assigned_tutor_id is null and lr.status in ('new','submitted','matching','waiting_tutor_proposal','proposal_received','rematch')
+          order by lr.created_at asc limit 100
+          """);
+      addWorkItems(items, """
+          select lr.id, 'learningRequests' module, 'REQUEST_MATCHING_FAIL' item_type,
+            coalesce(lr.request_code, lr.student_name, 'Learning request ' || lr.id::text) title, lr.status,
+            'HIGH' priority, 'HIGH' risk_level,
+            lr.created_at + interval '12 hours' sla_due_at,
+            true overdue,
+            'Không có proposal sau SLA; cần rematch hoặc can thiệp thủ công.' recommended_action,
+            concat('/admin/requests/', lr.id::text) detail_href,
+            null::text assigned_admin,
+            lr.created_at, lr.updated_at, 'LEARNING_REQUEST' related_type, lr.id related_id
+          from learning_requests lr
+          where lr.status in ('matching','waiting_tutor_proposal')
+            and lr.created_at < now() - interval '12 hours'
+            and not exists (select 1 from tutor_proposals tp where tp.learning_request_id = lr.id)
+          order by lr.created_at asc limit 100
+          """);
+      addWorkItems(items, """
+          select tb.id, 'bookings' module, 'BOOKING_UPCOMING' item_type,
+            coalesce(tb.student_name, 'Booking ' || tb.id::text) title, tb.status,
+            case when tb.scheduled_start < now() + interval '2 hours' then 'HIGH' else 'MEDIUM' end priority,
+            case when tb.parent_confirmed_at is null or tb.tutor_confirmed_at is null then 'HIGH' else 'MEDIUM' end risk_level,
+            tb.scheduled_start sla_due_at,
+            false overdue,
+            'Xác nhận lịch học thử và kiểm tra hai bên đã confirm.' recommended_action,
+            concat('/admin/bookings/', tb.id::text) detail_href,
+            null::text assigned_admin,
+            tb.created_at, tb.updated_at, 'BOOKING' related_type, tb.id related_id
+          from trial_bookings tb
+          where tb.status = 'scheduled' and tb.scheduled_start between now() and now() + interval '24 hours'
+          order by tb.scheduled_start asc limit 100
+          """);
+      addWorkItems(items, """
+          select tb.id, 'bookings' module, 'BOOKING_OVERDUE' item_type,
+            coalesce(tb.student_name, 'Booking ' || tb.id::text) title, tb.status,
+            'CRITICAL' priority, 'CRITICAL' risk_level,
+            tb.scheduled_start sla_due_at,
+            true overdue,
+            'Booking đã qua giờ nhưng chưa complete/cancel; cần xử lý kết quả học thử.' recommended_action,
+            concat('/admin/bookings/', tb.id::text) detail_href,
+            null::text assigned_admin,
+            tb.created_at, tb.updated_at, 'BOOKING' related_type, tb.id related_id
+          from trial_bookings tb
+          where tb.status = 'scheduled' and tb.scheduled_start < now() - interval '2 hours'
+          order by tb.scheduled_start asc limit 100
+          """);
+      addWorkItems(items, """
+          select tb.id, 'bookings' module, 'BOOKING_NO_SHOW_RISK' item_type,
+            coalesce(tb.student_name, 'Booking ' || tb.id::text) title, tb.status,
+            'HIGH' priority, 'HIGH' risk_level,
+            tb.updated_at + interval '4 hours' sla_due_at,
+            (tb.updated_at + interval '4 hours') < now() overdue,
+            'Xác minh no-show, quyết định rematch/cancel/refund nếu cần.' recommended_action,
+            concat('/admin/bookings/', tb.id::text) detail_href,
+            null::text assigned_admin,
+            tb.created_at, tb.updated_at, 'BOOKING' related_type, tb.id related_id
+          from trial_bookings tb
+          where tb.status in ('no_show_parent','no_show_student','no_show_tutor')
+             or exists (select 1 from booking_no_show_records bns where bns.booking_id = tb.id and bns.created_at > now() - interval '7 days')
+          order by tb.updated_at desc limit 100
+          """);
+      addWorkItems(items, """
+          select p.id, 'payments' module, 'PAYMENT_PENDING_LONG' item_type,
+            coalesce(p.description, 'Payment ' || p.id::text) title, p.status,
+            case when p.created_at < now() - interval '2 hours' then 'HIGH' else 'MEDIUM' end priority,
+            case when p.created_at < now() - interval '2 hours' then 'HIGH' else 'MEDIUM' end risk_level,
+            p.created_at + interval '30 minutes' sla_due_at,
+            (p.created_at + interval '30 minutes') < now() overdue,
+            'Đối soát gateway/webhook hoặc mark paid/failed theo chứng từ.' recommended_action,
+            concat('/admin/payments?id=', p.id::text) detail_href,
+            null::text assigned_admin,
+            p.created_at, p.updated_at, 'PAYMENT' related_type, p.id related_id
+          from payments p
+          where p.status in ('pending','processing') and p.created_at < now() - interval '30 minutes'
+          order by p.created_at asc limit 100
+          """);
+      addWorkItems(items, """
+          select p.id, 'payments' module, 'PAYMENT_RECONCILIATION' item_type,
+            coalesce(p.description, 'Payment ' || p.id::text) title, p.status,
+            'HIGH' priority, 'HIGH' risk_level,
+            p.updated_at + interval '4 hours' sla_due_at,
+            (p.updated_at + interval '4 hours') < now() overdue,
+            'Kiểm tra payment failed/expired và quyết định retry, cancel hoặc hỗ trợ khách.' recommended_action,
+            concat('/admin/payments?id=', p.id::text) detail_href,
+            null::text assigned_admin,
+            p.created_at, p.updated_at, 'PAYMENT' related_type, p.id related_id
+          from payments p
+          where p.status in ('failed','expired')
+          order by p.updated_at desc limit 100
+          """);
+      addWorkItems(items, """
+          select pr.id, 'payments' module, 'REFUND_PENDING' item_type,
+            coalesce(pr.reason, 'Refund ' || pr.id::text) title, pr.status,
+            case when pr.created_at < now() - interval '24 hours' then 'HIGH' else 'MEDIUM' end priority,
+            case when pr.created_at < now() - interval '24 hours' then 'HIGH' else 'MEDIUM' end risk_level,
+            pr.created_at + interval '24 hours' sla_due_at,
+            (pr.created_at + interval '24 hours') < now() overdue,
+            'Theo dõi refund pending/processing và đối chiếu gateway.' recommended_action,
+            concat('/admin/payments?id=', pr.payment_id::text) detail_href,
+            null::text assigned_admin,
+            pr.created_at, pr.updated_at, 'PAYMENT' related_type, pr.payment_id related_id
+          from payment_refunds pr
+          where pr.status in ('pending','processing')
+          order by pr.created_at asc limit 100
+          """);
+      addWorkItems(items, """
+          select po.id, 'payouts' module, 'PAYOUT_PENDING' item_type,
+            coalesce(u.full_name, 'Payout ' || po.id::text) title, po.status,
+            case when po.created_at < now() - interval '48 hours' then 'HIGH' else 'MEDIUM' end priority,
+            case when po.bank_account is null or po.bank_name is null then 'HIGH' else 'MEDIUM' end risk_level,
+            po.created_at + interval '48 hours' sla_due_at,
+            (po.created_at + interval '48 hours') < now() overdue,
+            'Kiểm tra earning/ngân hàng và approve hoặc reject payout.' recommended_action,
+            concat('/admin/payouts?id=', po.id::text) detail_href,
+            null::text assigned_admin,
+            po.created_at, po.updated_at, 'PAYOUT' related_type, po.id related_id
+          from payouts po join tutor_profiles tp on tp.id = po.tutor_id join users u on u.id = tp.user_id
+          where po.status in ('pending','processing','approved')
+          order by po.created_at asc limit 100
+          """);
+      addWorkItems(items, """
+          select tp.id, 'tutors' module, 'TUTOR_QUALITY_WARNING' item_type,
+            coalesce(u.full_name, u.email, 'Tutor ' || tp.id::text) title, tp.status,
+            case when tp.rating_avg < 3 or exists (select 1 from trial_bookings tb where tb.tutor_id = tp.id and tb.status = 'no_show_tutor') then 'HIGH' else 'MEDIUM' end priority,
+            case when tp.rating_avg < 3 or exists (select 1 from trial_bookings tb where tb.tutor_id = tp.id and tb.status = 'no_show_tutor') then 'HIGH' else 'MEDIUM' end risk_level,
+            now() + interval '24 hours' sla_due_at,
+            false overdue,
+            'Rà chất lượng gia sư, review thấp, response rate và cân nhắc cảnh báo/suspend.' recommended_action,
+            concat('/admin/tutors/', tp.id::text) detail_href,
+            null::text assigned_admin,
+            tp.created_at, tp.updated_at, 'TUTOR' related_type, tp.id related_id
+          from tutor_profiles tp join users u on u.id = tp.user_id
+          where tp.status = 'approved' and (tp.rating_avg < 3.5 or tp.response_rate < 50 or exists (select 1 from trial_bookings tb where tb.tutor_id = tp.id and tb.status in ('cancelled_by_tutor','no_show_tutor')))
+          order by tp.rating_avg asc, tp.updated_at desc limit 100
+          """);
+      addWorkItems(items, """
+          select bd.id, 'complaints' module, 'COMPLAINT_OPEN' item_type,
+            coalesce(bd.title, bd.reason, 'Complaint ' || bd.id::text) title, bd.status,
+            bd.priority, bd.risk_level,
+            bd.sla_due_at,
+            bd.sla_due_at is not null and bd.sla_due_at < now() overdue,
+            'Assign owner, điều tra case và cập nhật timeline/resolution.' recommended_action,
+            concat('/admin/complaints/', bd.id::text) detail_href,
+            au.full_name assigned_admin,
+            bd.assigned_admin_id assigned_admin_id,
+            bd.created_at, bd.updated_at, coalesce(bd.related_type, 'BOOKING') related_type, coalesce(bd.related_id, bd.booking_id) related_id
+          from booking_disputes bd left join users au on au.id = bd.assigned_admin_id
+          where bd.status not in ('RESOLVED','CLOSED','REJECTED')
+          order by bd.sla_due_at asc nulls last, bd.created_at asc limit 100
+          """);
+      addWorkItems(items, """
+          select bd.id, 'complaints' module, 'COMPLAINT_SLA_OVERDUE' item_type,
+            coalesce(bd.title, bd.reason, 'Complaint ' || bd.id::text) title, bd.status,
+            'CRITICAL' priority, 'CRITICAL' risk_level,
+            bd.sla_due_at,
+            true overdue,
+            'Case quá SLA; cần escalate hoặc chốt phương án xử lý ngay.' recommended_action,
+            concat('/admin/complaints/', bd.id::text) detail_href,
+            au.full_name assigned_admin,
+            bd.assigned_admin_id assigned_admin_id,
+            bd.created_at, bd.updated_at, coalesce(bd.related_type, 'BOOKING') related_type, coalesce(bd.related_id, bd.booking_id) related_id
+          from booking_disputes bd left join users au on au.id = bd.assigned_admin_id
+          where bd.status not in ('RESOLVED','CLOSED','REJECTED') and bd.sla_due_at < now()
+          order by bd.sla_due_at asc limit 100
+          """);
+      items.sort(Comparator
+          .comparingInt((Map<String, Object> item) -> priorityRank(string(item.get("priority"))))
+          .thenComparing(item -> String.valueOf(item.getOrDefault("slaDueAt", ""))));
+      return items;
+    });
+  }
+
   public List<Map<String, Object>> disputes() {
-    return cached("disputes", () -> query("""
-        select bd.*, tb.student_name, s.name subject
-        from booking_disputes bd join trial_bookings tb on tb.id = bd.booking_id join subjects s on s.id = tb.subject_id
-        order by bd.created_at desc limit 200
-        """));
+    return cached("disputes", () -> disputes(200, 0));
   }
 
   public List<Map<String, Object>> disputes(int limit, int offset) {
-    return jdbc.query("""
-        select bd.*, tb.student_name, s.name subject
-        from booking_disputes bd join trial_bookings tb on tb.id = bd.booking_id join subjects s on s.id = tb.subject_id
-        order by bd.created_at desc limit ? offset ?
+    return jdbc.query(disputeSelect() + """
+        order by
+          case bd.priority when 'CRITICAL' then 0 when 'HIGH' then 1 when 'MEDIUM' then 2 else 3 end,
+          bd.sla_due_at asc nulls last,
+          bd.created_at desc
+        limit ? offset ?
         """, this::mapAny, limit, offset);
   }
 
@@ -149,42 +414,281 @@ public class AdminOperationService {
   }
 
   public Map<String, Object> dispute(UUID id) {
-    List<Map<String, Object>> rows = jdbc.query("""
-        select bd.*, tb.student_name, s.name subject
-        from booking_disputes bd join trial_bookings tb on tb.id = bd.booking_id join subjects s on s.id = tb.subject_id
-        where bd.id = ?
-        """, this::mapAny, id);
+    List<Map<String, Object>> rows = jdbc.query(disputeSelect() + " where bd.id = ?", this::mapAny, id);
     if (rows.isEmpty()) throw new NotFoundException("Không tìm thấy khiếu nại.");
-    return rows.get(0);
+    Map<String, Object> item = rows.get(0);
+    item.put("timeline", disputeTimeline(id));
+    item.put("notes", disputeNotes(id));
+    return item;
   }
 
   public Map<String, Object> updateDispute(UUID id, Map<String, Object> body) {
-    String status = string(body.get("status"));
-    String resolution = string(body.get("resolution"));
-    if (status == null || !List.of("OPEN", "IN_REVIEW", "RESOLVED", "REJECTED").contains(status)) {
-      throw new BusinessException("INVALID_DISPUTE_STATUS", "Trạng thái khiếu nại không hợp lệ.");
-    }
-    boolean terminal = List.of("RESOLVED", "REJECTED").contains(status);
+    Map<String, Object> before = dispute(id);
+    String current = canonicalDisputeStatus(string(before.get("status")));
+    String status = canonicalDisputeStatus(string(body.get("status")));
+    if (status == null) status = current;
+    requireDisputeTransition(current, status);
+    String resolution = firstNonBlank(body.get("resolution"), body.get("resolutionNote"));
+    String resolutionType = normalizedResolutionType(string(body.get("resolutionType")));
+    String priority = normalizedEnum(string(body.get("priority")), Set.of("LOW", "MEDIUM", "HIGH", "CRITICAL"), null);
+    String riskLevel = normalizedEnum(string(body.get("riskLevel")), Set.of("LOW", "MEDIUM", "HIGH", "CRITICAL"), null);
+    String reason = firstNonBlank(body.get("reason"), body.get("note"), resolution);
+    boolean terminal = List.of("RESOLVED", "REJECTED", "CLOSED").contains(status);
     jdbc.update("""
         update booking_disputes
-        set status = ?, resolution = coalesce(?, resolution),
+        set status = ?,
+          resolution = coalesce(?, resolution),
+          resolution_note = coalesce(?, resolution_note),
+          resolution_type = coalesce(?, resolution_type),
+          priority = coalesce(?, priority),
+          risk_level = coalesce(?, risk_level),
           resolved_by = case when ? then ? else resolved_by end,
           resolved_at = case when ? then now() else resolved_at end,
+          closed_at = case when ? then now() else closed_at end,
           updated_at = now()
         where id = ?
-        """, status, resolution, terminal, terminal ? db.currentUserIdOrThrow() : null, terminal, id);
-    db.auditCurrent("admin.dispute.update", "bookingDispute", id, "Admin cập nhật khiếu nại sang " + status + ".");
+        """, status, resolution, resolution, resolutionType, priority, riskLevel,
+        terminal, terminal ? db.currentUserIdOrThrow() : null, terminal,
+        "CLOSED".equals(status), id);
+    Map<String, Object> statusChange = new LinkedHashMap<>();
+    statusChange.put("status", status);
+    if (reason != null) statusChange.put("reason", reason);
+    insertDisputeTimeline(id, "STATUS_CHANGE", current, status, reason, auditMetadata(before, statusChange));
     cache.clear();
-    return dispute(id);
+    Map<String, Object> after = dispute(id);
+    db.auditCurrent("admin.dispute.update", "bookingDispute", id, "Admin cập nhật khiếu nại sang " + status + ".",
+        auditMetadata(before, after, reason));
+    return after;
+  }
+
+  public Map<String, Object> assignDispute(UUID id, Map<String, Object> body) {
+    Map<String, Object> before = dispute(id);
+    UUID assignee = uuid(body.get("assignedAdminId"));
+    if (assignee == null) assignee = db.currentUserIdOrThrow();
+    String current = canonicalDisputeStatus(string(before.get("status")));
+    String next = "NEW".equals(current) ? "ASSIGNED" : current;
+    requireDisputeTransition(current, next);
+    String reason = firstNonBlank(body.get("reason"), body.get("note"), "Assign owner");
+    jdbc.update("""
+        update booking_disputes
+        set assigned_admin_id = ?, status = ?, updated_at = now()
+        where id = ?
+        """, assignee, next, id);
+    insertDisputeTimeline(id, "ASSIGN_OWNER", current, next, reason, Map.of("assignedAdminId", assignee.toString()));
+    cache.clear();
+    Map<String, Object> after = dispute(id);
+    db.auditCurrent("admin.dispute.assign", "bookingDispute", id, "Admin phân công người xử lý khiếu nại.",
+        auditMetadata(before, after, reason));
+    return after;
+  }
+
+  public Map<String, Object> addDisputeNote(UUID id, Map<String, Object> body) {
+    String content = string(body.get("content"));
+    if (content == null) throw new BusinessException("DISPUTE_NOTE_REQUIRED", "Nội dung ghi chú không được trống.");
+    UUID actor = db.currentUserIdOrThrow();
+    jdbc.update("""
+        insert into admin_internal_notes(entity_type, entity_id, content, visibility, created_by)
+        values ('bookingDispute', ?, ?, 'INTERNAL_ONLY', ?)
+        """, id, content, actor);
+    jdbc.update("""
+        update booking_disputes
+        set internal_notes = internal_notes || jsonb_build_array(jsonb_build_object(
+          'content', ?,
+          'createdBy', ?::text,
+          'createdAt', now(),
+          'visibility', 'INTERNAL_ONLY'
+        )),
+        updated_at = now()
+        where id = ?
+        """, content, actor.toString(), id);
+    insertDisputeTimeline(id, "INTERNAL_NOTE", null, null, content, Map.of("visibility", "INTERNAL_ONLY"));
+    cache.clear();
+    Map<String, Object> after = dispute(id);
+    db.auditCurrent("admin.dispute.note", "bookingDispute", id, "Admin thêm ghi chú nội bộ cho khiếu nại.",
+        Map.of("noteLength", content.length()));
+    return after;
+  }
+
+  public Map<String, Object> addDisputeTimeline(UUID id, Map<String, Object> body) {
+    String eventType = string(body.get("eventType"));
+    if (eventType == null) eventType = "MANUAL_EVENT";
+    String note = firstNonBlank(body.get("note"), body.get("reason"));
+    insertDisputeTimeline(id, eventType, null, null, note, Map.of());
+    cache.clear();
+    Map<String, Object> after = dispute(id);
+    db.auditCurrent("admin.dispute.timeline", "bookingDispute", id, "Admin thêm timeline event cho khiếu nại.",
+        Map.of("eventType", eventType));
+    return after;
+  }
+
+  public Map<String, Object> resolveDispute(UUID id, Map<String, Object> body) {
+    Map<String, Object> payload = new LinkedHashMap<>(body);
+    payload.put("status", "RESOLVED");
+    return updateDispute(id, payload);
+  }
+
+  public Map<String, Object> closeDispute(UUID id, Map<String, Object> body) {
+    Map<String, Object> payload = new LinkedHashMap<>(body);
+    payload.put("status", "CLOSED");
+    return updateDispute(id, payload);
+  }
+
+  public Map<String, Object> escalateDispute(UUID id, Map<String, Object> body) {
+    Map<String, Object> payload = new LinkedHashMap<>(body);
+    payload.put("status", "ESCALATED");
+    payload.put("priority", "CRITICAL");
+    payload.put("riskLevel", "CRITICAL");
+    return updateDispute(id, payload);
+  }
+
+  private String disputeSelect() {
+    return """
+        select bd.*,
+          coalesce(bd.title, bd.reason, 'Khiếu nại booking ' || bd.booking_id::text) title,
+          coalesce(bd.description, bd.reason) description,
+          coalesce(bd.related_type, 'BOOKING') related_type,
+          coalesce(bd.related_id, bd.booking_id) related_id,
+          coalesce(bd.reporter_id, bd.opened_by) reporter_id,
+          coalesce(bd.sla_due_at, bd.created_at + interval '48 hours') sla_due_at,
+          (coalesce(bd.sla_due_at, bd.created_at + interval '48 hours') < now()
+            and bd.status not in ('RESOLVED','CLOSED','REJECTED')) overdue,
+          reporter.full_name reporter_name,
+          reporter.email reporter_email,
+          target.full_name target_user_name,
+          assignee.full_name assigned_admin,
+          tb.student_name,
+          tb.parent_name,
+          tb.tutor_id,
+          s.name subject
+        from booking_disputes bd
+        join trial_bookings tb on tb.id = bd.booking_id
+        join subjects s on s.id = tb.subject_id
+        left join users reporter on reporter.id = coalesce(bd.reporter_id, bd.opened_by)
+        left join users target on target.id = bd.target_user_id
+        left join users assignee on assignee.id = bd.assigned_admin_id
+        """;
+  }
+
+  private List<Map<String, Object>> disputeTimeline(UUID id) {
+    return jdbc.query("""
+        select bde.*, u.full_name actor_name
+        from booking_dispute_timeline_events bde
+        left join users u on u.id = bde.actor_user_id
+        where bde.dispute_id = ?
+        order by bde.created_at desc
+        """, this::mapAny, id);
+  }
+
+  private List<Map<String, Object>> disputeNotes(UUID id) {
+    return jdbc.query("""
+        select ain.*, u.full_name created_by_name
+        from admin_internal_notes ain
+        left join users u on u.id = ain.created_by
+        where ain.entity_type = 'bookingDispute' and ain.entity_id = ?
+        order by ain.created_at desc
+        """, this::mapAny, id);
+  }
+
+  private void insertDisputeTimeline(UUID id, String eventType, String from, String to, String note, Object metadata) {
+    Map<String, Object> actor = db.currentUserOrThrow();
+    jdbc.update("""
+        insert into booking_dispute_timeline_events(dispute_id, event_type, status_from, status_to, actor_user_id, actor_role, note, metadata)
+        values (?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+        """,
+        id,
+        eventType,
+        from,
+        to,
+        UUID.fromString(actor.get("id").toString()),
+        String.valueOf(actor.get("role")),
+        note,
+        json(metadata));
+  }
+
+  private void requireDisputeTransition(String current, String next) {
+    if (current == null || next == null || current.equals(next)) return;
+    if (!DISPUTE_STATUSES.contains(next) || !DISPUTE_TRANSITIONS.getOrDefault(current, Set.of()).contains(next)) {
+      throw new BusinessException("INVALID_DISPUTE_STATUS_TRANSITION", "Không thể chuyển khiếu nại từ " + current + " sang " + next + ".");
+    }
+  }
+
+  private String canonicalDisputeStatus(String status) {
+    String normalized = normalizedEnum(status, Set.copyOf(DISPUTE_STATUSES), null);
+    if ("OPEN".equals(normalized)) return "NEW";
+    if ("IN_REVIEW".equals(normalized)) return "INVESTIGATING";
+    return normalized;
+  }
+
+  private String normalizedResolutionType(String type) {
+    return normalizedEnum(type, DISPUTE_RESOLUTION_TYPES, null);
+  }
+
+  private String normalizedEnum(String value, Set<String> allowed, String fallback) {
+    if (value == null) return fallback;
+    String normalized = value.trim().toUpperCase();
+    if (allowed.contains(normalized)) return normalized;
+    throw new BusinessException("INVALID_ENUM_VALUE", "Giá trị không hợp lệ: " + value + ".");
+  }
+
+  private String firstNonBlank(Object... values) {
+    for (Object value : values) {
+      String text = string(value);
+      if (text != null) return text;
+    }
+    return null;
+  }
+
+  private UUID uuid(Object value) {
+    String text = string(value);
+    if (text == null) return null;
+    try {
+      return UUID.fromString(text);
+    } catch (IllegalArgumentException ex) {
+      throw new BusinessException("INVALID_UUID", "ID không hợp lệ.");
+    }
+  }
+
+  private Map<String, Object> auditMetadata(Object before, Object after) {
+    return auditMetadata(before, after, null);
+  }
+
+  private Map<String, Object> auditMetadata(Object before, Object after, String reason) {
+    Map<String, Object> metadata = new LinkedHashMap<>();
+    metadata.put("before", before);
+    metadata.put("after", after);
+    if (reason != null) metadata.put("reason", reason);
+    return metadata;
+  }
+
+  private String json(Object value) {
+    try {
+      return objectMapper.writeValueAsString(value == null ? Map.of() : value);
+    } catch (Exception ex) {
+      return "{}";
+    }
   }
 
   private List<Map<String, Object>> query(String sql) {
     return jdbc.query(sql, this::mapAny);
   }
 
+  private void addWorkItems(List<Map<String, Object>> items, String sql) {
+    items.addAll(query(sql));
+  }
+
   private int count(String sql) {
     Integer value = jdbc.queryForObject(sql, Integer.class);
     return value == null ? 0 : value;
+  }
+
+  private int priorityRank(String priority) {
+    return switch (priority == null ? "" : priority) {
+      case "CRITICAL" -> 0;
+      case "HIGH" -> 1;
+      case "MEDIUM" -> 2;
+      case "LOW" -> 3;
+      default -> 4;
+    };
   }
 
   private Map<String, Object> mapAny(ResultSet rs, int row) throws SQLException {

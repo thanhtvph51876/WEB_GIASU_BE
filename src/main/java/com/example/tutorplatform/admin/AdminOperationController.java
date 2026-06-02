@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -57,6 +58,11 @@ public class AdminOperationController {
     return ApiResponse.ok(service.tutorQuality());
   }
 
+  @GetMapping("/operations/work-items")
+  public ApiResponse<List<Map<String, Object>>> workItems() {
+    return ApiResponse.ok(service.workItems());
+  }
+
   @GetMapping("/disputes")
   public ApiResponse<List<Map<String, Object>>> disputes(
       @RequestParam(defaultValue = "1") int page,
@@ -78,5 +84,35 @@ public class AdminOperationController {
   @PatchMapping("/disputes/{id}")
   public ApiResponse<Map<String, Object>> updateDispute(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
     return ApiResponse.ok(service.updateDispute(id, body));
+  }
+
+  @PostMapping("/disputes/{id}/assign")
+  public ApiResponse<Map<String, Object>> assignDispute(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+    return ApiResponse.ok(service.assignDispute(id, body));
+  }
+
+  @PostMapping("/disputes/{id}/notes")
+  public ApiResponse<Map<String, Object>> addDisputeNote(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+    return ApiResponse.ok(service.addDisputeNote(id, body));
+  }
+
+  @PostMapping("/disputes/{id}/timeline")
+  public ApiResponse<Map<String, Object>> addDisputeTimeline(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+    return ApiResponse.ok(service.addDisputeTimeline(id, body));
+  }
+
+  @PostMapping("/disputes/{id}/resolve")
+  public ApiResponse<Map<String, Object>> resolveDispute(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+    return ApiResponse.ok(service.resolveDispute(id, body));
+  }
+
+  @PostMapping("/disputes/{id}/close")
+  public ApiResponse<Map<String, Object>> closeDispute(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+    return ApiResponse.ok(service.closeDispute(id, body));
+  }
+
+  @PostMapping("/disputes/{id}/escalate")
+  public ApiResponse<Map<String, Object>> escalateDispute(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+    return ApiResponse.ok(service.escalateDispute(id, body));
   }
 }
