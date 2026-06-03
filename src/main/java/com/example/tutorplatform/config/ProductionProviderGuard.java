@@ -20,10 +20,14 @@ public class ProductionProviderGuard implements ApplicationRunner {
   @Override
   public void run(ApplicationArguments args) {
     if (!strictProfile()) return;
+    String paymentMode = normalized(properties.payment().mode());
+    if (!"production".equals(paymentMode)) {
+      throw new IllegalStateException("Production/staging must use production payment mode.");
+    }
     String paymentProvider = normalized(firstNonBlank(properties.payment().provider(), properties.payment().mode(), properties.payment().defaultGateway()));
     String verificationProvider = normalized(properties.verification().provider());
-    if (isMock(paymentProvider) || normalized(properties.payment().defaultGateway()).equals("mock")) {
-      throw new IllegalStateException("Mock payment provider is not allowed in staging/prod.");
+    if (isNonProductionPaymentProvider(paymentProvider) || normalized(properties.payment().defaultGateway()).equals("mock")) {
+      throw new IllegalStateException("Mock or sandbox payment provider is not allowed in staging/prod.");
     }
     if (isMock(verificationProvider)) {
       throw new IllegalStateException("Mock verification provider is not allowed in staging/prod.");
@@ -40,6 +44,10 @@ public class ProductionProviderGuard implements ApplicationRunner {
 
   private boolean isMock(String value) {
     return value.equals("mock") || value.equals("simulated") || value.equals("sandbox_mock");
+  }
+
+  private boolean isNonProductionPaymentProvider(String value) {
+    return isMock(value) || value.equals("sandbox") || value.endsWith("_sandbox") || value.contains("sandbox_");
   }
 
   private String normalized(String value) {

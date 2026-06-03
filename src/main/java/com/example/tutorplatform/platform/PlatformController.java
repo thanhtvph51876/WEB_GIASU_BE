@@ -349,7 +349,7 @@ public class PlatformController {
       where.append(" and tp.status = 'approved' ");
     }
     long total = db.tutorCount(where.toString(), new ArrayList<>(args), false);
-    return ApiResponse.page(db.tutorList(where.toString(), args, page, pageSize, false).stream()
+    return ApiResponse.page(db.tutorList(where.toString(), args, page, pageSize, false, sort).stream()
         .map(tutor -> publicTutorDto(tutor, false))
         .toList(), PageMetadata.of(page, pageSize, total));
   }
@@ -369,7 +369,9 @@ public class PlatformController {
         join users u on u.id = tp.user_id
         where tf.user_id = ? and tp.status = 'approved'
         order by tf.created_at desc
-        """, db.tutorMapper(), userId));
+        """, db.tutorMapper(), userId).stream()
+        .map(tutor -> publicTutorDto(tutor, false))
+        .toList());
   }
 
   @GetMapping("/favorites/tutors/ids")
@@ -1185,8 +1187,8 @@ public class PlatformController {
   }
 
   @PostMapping("/admin/payments/{paymentId}/mark-failed")
-  public ApiResponse<Map<String, Object>> markFailed(@PathVariable UUID paymentId) {
-    return ApiResponse.ok(financeService.markFailed(paymentId), "Đã ghi nhận thanh toán thất bại.");
+  public ApiResponse<Map<String, Object>> markFailed(@PathVariable UUID paymentId, @RequestBody(required = false) Map<String, Object> body) {
+    return ApiResponse.ok(financeService.markFailed(paymentId, body), "Đã ghi nhận thanh toán thất bại.");
   }
 
   @PostMapping("/admin/payments/{paymentId}/refund")
@@ -1214,8 +1216,8 @@ public class PlatformController {
 
   @PostMapping("/admin/payouts/{payoutId}/approve")
   @Transactional
-  public ApiResponse<Map<String, Object>> approvePayout(@PathVariable UUID payoutId) {
-    return ApiResponse.ok(financeService.approvePayout(payoutId));
+  public ApiResponse<Map<String, Object>> approvePayout(@PathVariable UUID payoutId, @RequestBody(required = false) Map<String, Object> body) {
+    return ApiResponse.ok(financeService.approvePayout(payoutId, body));
   }
 
   @PostMapping("/admin/payouts/{payoutId}/reject")

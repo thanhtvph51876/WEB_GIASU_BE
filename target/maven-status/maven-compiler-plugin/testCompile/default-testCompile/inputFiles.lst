@@ -1,5 +1,7 @@
+H:\backend\src\test\java\com\example\tutorplatform\config\ProductionProviderGuardTest.java
 H:\backend\src\test\java\com\example\tutorplatform\payment\gateway\mock\MockPaymentGatewayTest.java
 H:\backend\src\test\java\com\example\tutorplatform\policy\StatusTransitionPolicyTest.java
+H:\backend\src\test\java\com\example\tutorplatform\security\JwtServiceTest.java
 H:\backend\src\test\java\com\example\tutorplatform\security\PermissionServiceTest.java
 H:\backend\src\test\java\com\example\tutorplatform\security\SecurityHardeningIntegrationTest.java
 H:\backend\src\test\java\com\example\tutorplatform\TutorPlatformApplicationTests.java

@@ -9,6 +9,7 @@ import com.example.tutorplatform.common.ForbiddenException;
 import com.example.tutorplatform.db.DbService;
 import com.example.tutorplatform.payment.PaymentService;
 import com.example.tutorplatform.policy.StatusTransitionPolicy;
+import com.example.tutorplatform.security.PermissionService;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -24,13 +25,15 @@ public class FinanceService {
   private final PaymentService paymentService;
   private final StatusTransitionPolicy statusPolicy;
   private final EarningLedgerService ledgerService;
+  private final PermissionService permissions;
 
-  public FinanceService(DbService db, PaymentService paymentService, StatusTransitionPolicy statusPolicy, EarningLedgerService ledgerService) {
+  public FinanceService(DbService db, PaymentService paymentService, StatusTransitionPolicy statusPolicy, EarningLedgerService ledgerService, PermissionService permissions) {
     this.db = db;
     this.jdbc = db.jdbc();
     this.paymentService = paymentService;
     this.statusPolicy = statusPolicy;
     this.ledgerService = ledgerService;
+    this.permissions = permissions;
   }
 
   public List<Map<String, Object>> payments() {
@@ -40,7 +43,7 @@ public class FinanceService {
 
   public Map<String, Object> payment(UUID paymentId) {
     Map<String, Object> payment = jdbc.queryForObject("select * from payments where id = ?", db.paymentMapper(), paymentId);
-    if (!db.isAdmin() && !db.currentUserIdOrThrow().equals(uuid(payment.get("userId")))) {
+    if (!permissions.has("payments.read") && !db.currentUserIdOrThrow().equals(uuid(payment.get("userId")))) {
       throw new ForbiddenException("Bạn không có quyền xem thanh toán này.");
     }
     return payment;
@@ -87,14 +90,17 @@ public class FinanceService {
   }
 
   public List<Map<String, Object>> adminPayments() {
+    permissions.require("payments.read");
     return jdbc.query("select * from payments order by created_at desc limit 500", db.paymentMapper());
   }
 
   public List<Map<String, Object>> adminPayments(int limit, int offset) {
+    permissions.require("payments.read");
     return jdbc.query("select * from payments order by created_at desc limit ? offset ?", db.paymentMapper(), limit, offset);
   }
 
   public Map<String, Object> adminPayment(UUID paymentId) {
+    permissions.require("payments.read");
     return jdbc.queryForObject("select * from payments where id = ?", db.paymentMapper(), paymentId);
   }
 
@@ -102,8 +108,8 @@ public class FinanceService {
     return paymentService.adminMarkPaid(paymentId, body == null ? null : firstString(body, "reason", "note"));
   }
 
-  public Map<String, Object> markFailed(UUID paymentId) {
-    return paymentService.adminMarkFailed(paymentId);
+  public Map<String, Object> markFailed(UUID paymentId, Map<String, Object> body) {
+    return paymentService.adminMarkFailed(paymentId, body == null ? null : firstString(body, "reason", "note"));
   }
 
   public Map<String, Object> refund(UUID paymentId, Map<String, Object> body) {
@@ -111,6 +117,7 @@ public class FinanceService {
   }
 
   public List<Map<String, Object>> adminPayouts() {
+    permissions.require("payouts.read");
     return jdbc.query("""
         select p.*, u.full_name tutor_name from payouts p
         join tutor_profiles tp on tp.id = p.tutor_id join users u on u.id = tp.user_id
@@ -120,6 +127,7 @@ public class FinanceService {
   }
 
   public List<Map<String, Object>> adminPayouts(int limit, int offset) {
+    permissions.require("payouts.read");
     return jdbc.query("""
         select p.*, u.full_name tutor_name from payouts p
         join tutor_profiles tp on tp.id = p.tutor_id join users u on u.id = tp.user_id
@@ -129,11 +137,14 @@ public class FinanceService {
   }
 
   public Map<String, Object> adminPayout(UUID payoutId) {
+    permissions.require("payouts.read");
     return payoutById(payoutId);
   }
 
   @Transactional
-  public Map<String, Object> approvePayout(UUID payoutId) {
+  public Map<String, Object> approvePayout(UUID payoutId, Map<String, Object> body) {
+    permissions.require("payouts.approve");
+    String reason = requiredReason(body);
     Map<String, Object> payout = payoutByIdForUpdate(payoutId);
     statusPolicy.requirePayout(payout.get("status").toString(), "paid");
     List<Map<String, Object>> items = payoutItemsForUpdate(payoutId);
@@ -156,12 +167,13 @@ public class FinanceService {
     }
     UUID tutorUser = jdbc.queryForObject("select user_id from tutor_profiles where id = ?", UUID.class, tutorId);
     db.notify(tutorUser, "success", "Rút tiền đã được duyệt", "Yêu cầu rút tiền của bạn đã được duyệt.", "/dashboard/tutor/earnings", "payout", payoutId);
-    db.auditCurrent("admin.approve_payout", "payout", payoutId, "Admin duyệt yêu cầu rút tiền.");
+    db.auditCurrent("admin.approve_payout", "payout", payoutId, "Admin duyệt yêu cầu rút tiền. Lý do: " + reason);
     return payoutById(payoutId);
   }
 
   @Transactional
   public Map<String, Object> rejectPayout(UUID payoutId, Map<String, Object> body) {
+    permissions.require("payouts.reject");
     Map<String, Object> payout = payoutByIdForUpdate(payoutId);
     statusPolicy.requirePayout(payout.get("status").toString(), "rejected");
     List<Map<String, Object>> items = payoutItemsForUpdate(payoutId);

@@ -32,10 +32,11 @@ public class ParentStudentService {
     UUID householdId = ensureHousehold(parentId, string(body, "householdName", "Gia đình"));
     String fullName = required(body, "fullName");
     UUID gradeId = uuid(body.get("gradeId"));
+    UUID linkedUserId = linkedStudentUserIdForCreate(body);
     UUID studentId = jdbc.queryForObject("""
         insert into student_profiles(user_id, household_id, full_name, date_of_birth, gender, grade_id, school_name, learning_goal, note)
         values (?, ?, ?, ?::date, ?, ?, ?, ?, ?) returning id
-        """, UUID.class, uuid(body.get("userId")), householdId, fullName, string(body, "dateOfBirth", null),
+        """, UUID.class, linkedUserId, householdId, fullName, string(body, "dateOfBirth", null),
         string(body, "gender", null), gradeId, string(body, "schoolName", null), string(body, "learningGoal", null), string(body, "note", null));
     jdbc.update("""
         insert into guardian_student_links(guardian_user_id, student_profile_id, relationship, can_pay, can_book, can_message_tutor, can_view_report, can_manage_profile)
@@ -164,6 +165,20 @@ public class ParentStudentService {
   private void requireParent() {
     String role = db.currentUserOrThrow().get("role").toString();
     if (!"parent".equals(role) && !db.isAdmin()) throw new ForbiddenException("Chức năng này dành cho phụ huynh.");
+  }
+
+  private UUID linkedStudentUserIdForCreate(Map<String, Object> body) {
+    UUID linkedUserId = uuid(body.get("userId"));
+    if (linkedUserId == null) return null;
+    if (!db.isAdmin()) {
+      throw new ForbiddenException("Phụ huynh không được gắn hồ sơ học sinh với tài khoản người dùng trực tiếp.");
+    }
+    Map<String, Object> linkedUser = db.userById(linkedUserId)
+        .orElseThrow(() -> new NotFoundException("Không tìm thấy tài khoản học sinh."));
+    if (!"student".equals(linkedUser.get("role"))) {
+      throw new BusinessException("INVALID_STUDENT_USER", "Tài khoản được gắn phải có vai trò học sinh.");
+    }
+    return linkedUserId;
   }
 
   private List<Map<String, Object>> reports(UUID studentProfileId) {

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd" version="3.0" name="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.002" tests="17" errors="0" skipped="17" failures="0">
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd" version="3.0" name="com.example.tutorplatform.config.ProductionProviderGuardTest" time="0.197" tests="3" errors="0" skipped="0" failures="0">
   <properties>
     <property name="java.specification.version" value="21"/>
     <property name="sun.cpu.isalist" value="amd64"/>
@@ -61,60 +61,7 @@
     <property name="maven.repo.local" value="H:\backend\.mvn\repository"/>
     <property name="java.class.version" value="65.0"/>
   </properties>
-  <testcase name="tutorReuploadAfterApprovalResetsProfileToPendingVerification" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-    <system-out><![CDATA[18:19:01.507 [main] INFO org.testcontainers.dockerclient.DockerMachineClientProviderStrategy -- docker-machine executable was not found on PATH ([C:\Users\trinh\.codex\tmp\arg0\codex-arg0ghgbtO, C:\Program Files\Common Files\Oracle\Java\javapath, C:\Program Files (x86)\Common Files\Oracle\Java\javapath, C:\WINDOWS\system32, C:\WINDOWS, C:\WINDOWS\System32\Wbem, C:\WINDOWS\System32\WindowsPowerShell\v1.0\, C:\WINDOWS\System32\OpenSSH\, C:\Program Files (x86)\Microsoft SQL Server\160\Tools\Binn\, C:\Program Files\Microsoft SQL Server\160\Tools\Binn\, C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\, C:\Program Files\Microsoft SQL Server\160\DTS\Binn\, C:\Program Files\Azure Data Studio\bin, C:\Program Files (x86)\Microsoft SQL Server\160\DTS\Binn\, C:\Program Files\Git\cmd, C:\Program Files\Java\jdk-21\bin, C:\Users\trinh\Downloads\apache-maven-3.6.0-bin\apache-maven-3.6.0\bin, C:\Maven\bin, C:\Program Files\TortoiseGit\bin, C:\Program Files\Docker\Docker\resources\bin, C:\Program Files\nodejs\, C:\Program Files\cursor\resources\app\bin, C:\Program Files\dotnet\, C:\Program Files\Kubernetes\Minikube, C:\Users\trinh\AppData\Local\Programs\Python\Python311\Scripts\, C:\Users\trinh\AppData\Local\Programs\Python\Python311\, C:\Users\trinh\AppData\Local\Programs\Python\Python312\Scripts\, C:\Users\trinh\AppData\Local\Programs\Python\Python312\, C:\Users\trinh\AppData\Local\Programs\Python\Launcher\, C:\Users\trinh\.local\bin, C:\Users\trinh\AppData\Local\Microsoft\WindowsApps, C:\Program Files\Azure Data Studio\bin, D:\Microsoft VS Code\bin, C:\Program Files\JetBrains\IntelliJ IDEA 2025.2.3\bin, C:\Users\trinh\AppData\Local\Programs\cursor\resources\app\bin, C:\Users\trinh\AppData\Local\Programs\Microsoft VS Code\bin, C:\Users\trinh\AppData\Roaming\npm, C:\Users\trinh\AppData\Local\Programs\Windsurf\bin, C:\Users\trinh\.bun\bin, C:\Users\trinh\.deno\bin, C:\Users\trinh\AppData\Local\Python\bin, C:\Program Files\Kubernetes\Minikube, c:\Users\trinh\.vscode\extensions\openai.chatgpt-26.5601.21317-win32-x64\bin\windows-x86_64])
-18:19:01.511 [main] ERROR org.testcontainers.dockerclient.DockerClientProviderStrategy -- Could not find a valid Docker environment. Please check configuration. Attempted configurations were:
-As no valid configuration was found, execution cannot continue.
-See https://java.testcontainers.org/on_failure.html for more details.
-]]></system-out>
-  </testcase>
-  <testcase name="duplicateDocumentAcrossDifferentTutorIsFlaggedByHash" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="studentUploadAgreementSubmitAndAdminApproveVerification" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="approveTutorWithEligibleDocumentsWritesAuditSnapshot" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="payoutLocksOnlyAllocatedEarningsAndApproveMarksOnlyThoseItems" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="tutorCannotAcceptOtherTutorsBookingAndSuspendedTutorCannotAccept" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="accessTokenWorksRefreshTokenCannotCallProtectedApiAndLogoutRevokesRefreshToken" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="approveTutorRequiresBackendEligibilityAndReturnsReasons" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="registerCannotEscalateToAdminRole" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="userCannotReadOrCancelOtherUsersLearningRequest" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="invalidLoginReturnsUnauthorizedNotInternalError" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="paymentGatewaySelectionIsModeSafe" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="adminRoutesRequireAdminRole" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="suspendedUserCannotRefresh" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="privateFileRequiresOwnerOrAdmin" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="publicLearningRequestDoesNotReturnPii" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
-  <testcase name="completingSessionTwiceCreatesSinglePaymentAndEarning" classname="com.example.tutorplatform.security.SecurityHardeningIntegrationTest" time="0.0">
-    <skipped message="disabledWithoutDocker is true and Docker is not available"/>
-  </testcase>
+  <testcase name="productionRejectsSandboxPaymentMode" classname="com.example.tutorplatform.config.ProductionProviderGuardTest" time="0.167"/>
+  <testcase name="productionAllowsProductionModeWithRealProviders" classname="com.example.tutorplatform.config.ProductionProviderGuardTest" time="0.001"/>
+  <testcase name="productionRejectsSandboxPaymentProvider" classname="com.example.tutorplatform.config.ProductionProviderGuardTest" time="0.002"/>
 </testsuite>

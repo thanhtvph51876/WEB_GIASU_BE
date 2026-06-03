@@ -490,10 +490,15 @@ public class DbService {
   }
 
   public List<Map<String, Object>> tutorList(String extraWhere, List<Object> args, int page, int pageSize, boolean admin) {
+    return tutorList(extraWhere, args, page, pageSize, admin, "rating_desc");
+  }
+
+  public List<Map<String, Object>> tutorList(String extraWhere, List<Object> args, int page, int pageSize, boolean admin, String sort) {
     String where = admin ? " where 1=1 " : " where tp.status = 'approved' ";
     if (extraWhere != null && !extraWhere.isBlank()) {
       where += extraWhere;
     }
+    String orderBy = tutorOrderBy(sort);
     args.add(pageSize);
     args.add(Math.max(0, (page - 1) * pageSize));
     if (admin) {
@@ -501,7 +506,7 @@ public class DbService {
           select tp.*, u.full_name, u.avatar_url
           from tutor_profiles tp
           join users u on u.id = tp.user_id
-          """ + where + " order by tp.rating_avg desc, tp.created_at desc limit ? offset ?", tutorMapper(), args.toArray());
+          """ + where + orderBy + " limit ? offset ?", tutorMapper(), args.toArray());
     }
     return jdbc.query("""
         select tp.id, tp.user_id, tp.status, tp.gender, tp.headline, tp.university, tp.education, tp.major,
@@ -557,7 +562,19 @@ public class DbService {
                ), '[]'::jsonb)::text available_slots_json
         from tutor_profiles tp
         join users u on u.id = tp.user_id
-        """ + where + " order by tp.rating_avg desc, tp.created_at desc limit ? offset ?", publicTutorListMapper(), args.toArray());
+        """ + where + orderBy + " limit ? offset ?", publicTutorListMapper(), args.toArray());
+  }
+
+  private String tutorOrderBy(String sort) {
+    String createdAt = "tp.created_at desc";
+    return switch (sort == null ? "rating_desc" : sort) {
+      case "price_asc" -> " order by tp.hourly_rate_min asc nulls last, tp.hourly_rate_max asc nulls last, " + createdAt;
+      case "price_desc" -> " order by tp.hourly_rate_max desc nulls last, tp.hourly_rate_min desc nulls last, " + createdAt;
+      case "experience_desc" -> " order by tp.experience_years desc nulls last, tp.rating_avg desc nulls last, " + createdAt;
+      case "newest" -> " order by " + createdAt;
+      case "rating_desc", "best_match" -> " order by tp.rating_avg desc nulls last, " + createdAt;
+      default -> " order by tp.rating_avg desc nulls last, " + createdAt;
+    };
   }
 
   public long tutorCount(String extraWhere, List<Object> args, boolean admin) {

@@ -3,6 +3,7 @@ package com.example.tutorplatform.policy;
 import com.example.tutorplatform.db.DbService;
 import com.example.tutorplatform.security.PermissionService;
 import com.example.tutorplatform.security.SecurityUtils;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -25,7 +26,6 @@ public class FilePolicy {
       return true;
     }
     return SecurityUtils.currentUserId().map(userId -> {
-      if (db.isAdmin()) return true;
       if (canViewAsPrivilegedAdmin(file)) return true;
       Object ownerId = file.get("ownerId");
       if (ownerId != null && userId.equals(UUID.fromString(ownerId.toString()))) return true;
@@ -74,11 +74,27 @@ public class FilePolicy {
 
   private boolean canViewAsPrivilegedAdmin(Map<String, Object> file) {
     if (permissions.has("files.view_private")) return true;
-    String entityType = file.get("entityType") == null ? "" : file.get("entityType").toString();
-    String purpose = file.get("purpose") == null ? "" : file.get("purpose").toString();
-    if ("verification".equals(entityType) && permissions.has("files.view_verification")) return true;
-    return ("tutor_document".equals(entityType) || "tutor_document".equals(purpose))
-        && permissions.has("files.view_tutor_document");
+    String entityType = text(file.get("entityType"));
+    String purpose = text(file.get("purpose"));
+    if ("verification".equals(entityType) || isVerificationPurpose(purpose)) {
+      return permissions.has("files.view_verification");
+    }
+    if ("tutor_document".equals(entityType) || "tutor_document".equals(purpose)) {
+      return permissions.has("files.view_tutor_document");
+    }
+    if ("payment".equals(entityType) || "invoice".equals(purpose) || "receipt".equals(purpose)) {
+      return permissions.has("payments.read");
+    }
+    return false;
+  }
+
+  private boolean isVerificationPurpose(String purpose) {
+    return List.of("student_card", "student_selfie", "tutor_identity", "tutor_certificate", "contract")
+        .contains(purpose);
+  }
+
+  private String text(Object value) {
+    return value == null ? "" : value.toString();
   }
 
   private boolean exists(String sql, Object... args) {

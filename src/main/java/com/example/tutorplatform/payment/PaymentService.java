@@ -160,10 +160,13 @@ public class PaymentService {
   }
 
   @Transactional
-  public Map<String, Object> adminMarkFailed(UUID paymentId) {
+  public Map<String, Object> adminMarkFailed(UUID paymentId, String reason) {
     permissions.require("payments.mark_failed");
+    if (reason == null || reason.isBlank()) {
+      throw new BusinessException("REASON_REQUIRED", "Cần nhập lý do ghi nhận thanh toán thất bại.");
+    }
     markPaymentTerminal(paymentId, "failed", "Thanh toán thất bại", "Thanh toán của bạn chưa thành công. Vui lòng thử lại hoặc liên hệ hỗ trợ.");
-    db.auditCurrent("admin.payment_mark_failed", "payment", paymentId, "Admin ghi nhận thanh toán thất bại.");
+    db.auditCurrent("admin.payment_mark_failed", "payment", paymentId, "Admin ghi nhận thanh toán thất bại. Lý do: " + reason);
     return paymentById(paymentId);
   }
 
@@ -545,7 +548,7 @@ public class PaymentService {
   }
 
   private void requirePaymentOwner(Map<String, Object> payment) {
-    if (db.isAdmin()) return;
+    if (permissions.has("payments.read")) return;
     UUID userId = UUID.fromString(payment.get("userId").toString());
     if (!db.currentUserIdOrThrow().equals(userId)) {
       throw new ForbiddenException("Bạn không có quyền xem hoặc xử lý thanh toán này.");
