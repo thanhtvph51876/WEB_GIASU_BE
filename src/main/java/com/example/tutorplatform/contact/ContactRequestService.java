@@ -37,7 +37,39 @@ public class ContactRequestService {
   }
 
   public List<Map<String, Object>> adminContacts(int limit, int offset) {
-    return jdbc.query(contactSelect() + " order by cr.created_at desc limit ? offset ?", contactMapper(), limit, offset);
+    return adminContacts(null, null, limit, offset);
+  }
+
+  public List<Map<String, Object>> adminContacts(String status, String search, int limit, int offset) {
+    List<Object> args = new java.util.ArrayList<>();
+    String where = contactWhere(status, search, args);
+    args.add(limit);
+    args.add(offset);
+    return jdbc.query(contactSelect() + where + " order by cr.created_at desc limit ? offset ?", contactMapper(), args.toArray());
+  }
+
+  public long adminContactsCount(String status, String search) {
+    List<Object> args = new java.util.ArrayList<>();
+    String where = contactWhere(status, search, args);
+    Long total = jdbc.queryForObject("select count(*) from contact_requests cr " + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
+  }
+
+  private String contactWhere(String status, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and cr.status = ? ");
+      args.add(status);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim() + "%";
+      where.append(" and (lower(cr.full_name) like lower(?) or lower(cr.email) like lower(?) or coalesce(cr.phone, '') like ? or lower(cr.message) like lower(?)) ");
+      args.add(pattern);
+      args.add(pattern);
+      args.add(pattern);
+      args.add(pattern);
+    }
+    return where.toString();
   }
 
   public Map<String, Object> updateStatus(UUID contactId, Map<String, Object> body) {

@@ -34,6 +34,28 @@ public class ConversationService {
         """, db.conversationMapper(userId), userId);
   }
 
+  public List<Map<String, Object>> conversations(int limit, int offset) {
+    UUID userId = db.currentUserIdOrThrow();
+    return jdbc.query("""
+        select c.* from conversations c
+        join conversation_members cm on cm.conversation_id = c.id
+        where cm.user_id = ?
+        order by c.updated_at desc
+        limit ? offset ?
+        """, db.conversationMapper(userId), userId, limit, offset);
+  }
+
+  public long conversationsCount() {
+    UUID userId = db.currentUserIdOrThrow();
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from conversations c
+        join conversation_members cm on cm.conversation_id = c.id
+        where cm.user_id = ?
+        """, Long.class, userId);
+    return total == null ? 0 : total;
+  }
+
   @Transactional
   public Map<String, Object> createConversation(Map<String, Object> body) {
     UUID userId = db.currentUserIdOrThrow();
@@ -61,6 +83,24 @@ public class ConversationService {
         ) recent_messages
         order by created_at
         """, db.messageMapper(userId), conversationId);
+  }
+
+  public List<Map<String, Object>> messages(UUID conversationId, int limit, int offset) {
+    UUID userId = db.currentUserIdOrThrow();
+    requireConversationMember(conversationId, userId);
+    return jdbc.query("""
+        select * from (
+          select * from messages where conversation_id = ? order by created_at desc limit ? offset ?
+        ) recent_messages
+        order by created_at
+        """, db.messageMapper(userId), conversationId, limit, offset);
+  }
+
+  public long messagesCount(UUID conversationId) {
+    UUID userId = db.currentUserIdOrThrow();
+    requireConversationMember(conversationId, userId);
+    Long total = jdbc.queryForObject("select count(*) from messages where conversation_id = ?", Long.class, conversationId);
+    return total == null ? 0 : total;
   }
 
   public Map<String, Object> sendMessage(UUID conversationId, String content) {

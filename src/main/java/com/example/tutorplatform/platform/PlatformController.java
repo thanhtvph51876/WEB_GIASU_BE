@@ -295,6 +295,8 @@ public class PlatformController {
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "20") int pageSize
   ) {
+    int safePage = safePage(page);
+    int safePageSize = safePublicPageSize(pageSize);
     List<Object> args = new ArrayList<>();
     StringBuilder where = new StringBuilder();
     if (q != null && !q.isBlank()) {
@@ -349,9 +351,9 @@ public class PlatformController {
       where.append(" and tp.status = 'approved' ");
     }
     long total = db.tutorCount(where.toString(), new ArrayList<>(args), false);
-    return ApiResponse.page(db.tutorList(where.toString(), args, page, pageSize, false, sort).stream()
+    return ApiResponse.page(db.tutorList(where.toString(), args, safePage, safePageSize, false, sort).stream()
         .map(tutor -> publicTutorDto(tutor, false))
-        .toList(), PageMetadata.of(page, pageSize, total));
+        .toList(), PageMetadata.of(safePage, safePageSize, total));
   }
 
   @GetMapping("/tutors/{tutorId}")
@@ -519,14 +521,44 @@ public class PlatformController {
   }
 
   @GetMapping("/admin/tutors")
-  public ApiResponse<List<Map<String, Object>>> adminTutors(@RequestParam(required = false) String status) {
+  public ApiResponse<List<Map<String, Object>>> adminTutors(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String search,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "100") int pageSize
+  ) {
+    int safePage = safePage(page);
+    int safePageSize = safePageSize(pageSize);
     List<Object> args = new ArrayList<>();
     String where = "";
-    if (status != null && !status.isBlank()) {
-      where = " and tp.status = ? ";
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where += " and tp.status = ? ";
       args.add(status);
     }
-    return ApiResponse.ok(db.tutorList(where, args, 1, 500, true));
+    if (search != null && !search.isBlank()) {
+      where += """
+           and (
+             lower(coalesce(u.full_name, '')) like ?
+             or lower(coalesce(u.email, '')) like ?
+             or lower(coalesce(tp.university, '')) like ?
+             or lower(coalesce(tp.major, '')) like ?
+             or lower(coalesce(tp.student_code, '')) like ?
+             or exists (
+               select 1
+               from tutor_subjects ts
+               join subjects s on s.id = ts.subject_id
+               where ts.tutor_id = tp.id and lower(coalesce(s.name, '')) like ?
+             )
+           )
+          """;
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      for (int i = 0; i < 6; i++) args.add(pattern);
+    }
+    long total = db.tutorCount(where, new ArrayList<>(args), true);
+    return ApiResponse.page(
+        db.tutorList(where, args, safePage, safePageSize, true, "newest"),
+        PageMetadata.of(safePage, safePageSize, total)
+    );
   }
 
   @GetMapping("/admin/tutors/{tutorId}")
@@ -621,8 +653,22 @@ public class PlatformController {
   }
 
   @GetMapping("/public/learning-requests")
-  public ApiResponse<List<Map<String, Object>>> publicLearningRequests() {
-    return ApiResponse.ok(learningRequestService.publicLearningRequests());
+  public ApiResponse<List<Map<String, Object>>> publicLearningRequests(
+      @RequestParam(required = false) String search,
+      @RequestParam(required = false) String q,
+      @RequestParam(required = false) String subject,
+      @RequestParam(required = false) String grade,
+      @RequestParam(required = false) String location,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "24") int pageSize
+  ) {
+    int safePage = safePage(page);
+    int safePageSize = safePageSize(pageSize);
+    String query = search != null ? search : q;
+    return ApiResponse.page(
+        learningRequestService.publicLearningRequests(query, subject, grade, location, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, learningRequestService.publicLearningRequestsCount(query, subject, grade, location))
+    );
   }
 
   @PostMapping("/public/learning-requests")
@@ -674,14 +720,16 @@ public class PlatformController {
 
   @GetMapping("/admin/learning-requests")
   public ApiResponse<List<Map<String, Object>>> adminLearningRequests(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String search,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
     return ApiResponse.page(
-        learningRequestService.adminLearningRequests(safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from learning_requests"))
+        learningRequestService.adminLearningRequests(status, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, learningRequestService.adminLearningRequestsCount(status, search))
     );
   }
 
@@ -760,14 +808,16 @@ public class PlatformController {
 
   @GetMapping("/admin/bookings")
   public ApiResponse<List<Map<String, Object>>> adminBookings(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String search,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
     return ApiResponse.page(
-        bookingWorkflowService.adminBookings(safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from trial_bookings"))
+        bookingWorkflowService.adminBookings(status, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, bookingWorkflowService.adminBookingsCount(status, search))
     );
   }
 
@@ -864,27 +914,31 @@ public class PlatformController {
 
   @GetMapping("/admin/classes")
   public ApiResponse<List<Map<String, Object>>> adminClasses(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String search,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
     return ApiResponse.page(
-        classSessionService.adminClasses(safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from tutoring_classes"))
+        classSessionService.adminClasses(status, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, classSessionService.adminClassesCount(status, search))
     );
   }
 
   @GetMapping("/admin/sessions")
   public ApiResponse<List<Map<String, Object>>> adminSessions(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String search,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
     return ApiResponse.page(
-        classSessionService.adminSessions(safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from class_sessions"))
+        classSessionService.adminSessions(status, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, classSessionService.adminSessionsCount(status, search))
     );
   }
 
@@ -991,14 +1045,40 @@ public class PlatformController {
 
   @GetMapping("/admin/reviews")
   public ApiResponse<List<Map<String, Object>>> adminReviews(
+      @RequestParam(required = false) String tutorId,
+      @RequestParam(required = false) String classId,
+      @RequestParam(required = false) Integer rating,
+      @RequestParam(required = false) String status,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
+    List<Object> args = new ArrayList<>();
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (tutorId != null && !tutorId.isBlank() && !"all".equals(tutorId)) {
+      where.append(" and r.tutor_id = ? ");
+      args.add(UUID.fromString(tutorId));
+    }
+    if (classId != null && !classId.isBlank() && !"all".equals(classId)) {
+      where.append(" and r.class_id = ? ");
+      args.add(UUID.fromString(classId));
+    }
+    if (rating != null) {
+      where.append(" and r.rating = ? ");
+      args.add(rating);
+    }
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and r.status = ? ");
+      args.add(status);
+    }
     return ApiResponse.page(
-        db.reviewsPage("", safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from reviews"))
+        db.reviewsPage(where.toString(), safePageSize, offset(safePage, safePageSize), args.toArray()),
+        PageMetadata.of(safePage, safePageSize, countSql("""
+            select count(*)
+            from reviews r
+            join users u on u.id = r.reviewer_id
+            """ + where, args.toArray()))
     );
   }
 
@@ -1029,8 +1109,16 @@ public class PlatformController {
   }
 
   @GetMapping("/conversations")
-  public ApiResponse<List<Map<String, Object>>> conversations() {
-    return ApiResponse.ok(conversationService.conversations());
+  public ApiResponse<List<Map<String, Object>>> conversations(
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "50") int pageSize
+  ) {
+    int safePage = safePage(page);
+    int safePageSize = safePageSize(pageSize);
+    return ApiResponse.page(
+        conversationService.conversations(safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, conversationService.conversationsCount())
+    );
   }
 
   @PostMapping("/conversations")
@@ -1045,8 +1133,17 @@ public class PlatformController {
   }
 
   @GetMapping("/conversations/{conversationId}/messages")
-  public ApiResponse<List<Map<String, Object>>> messages(@PathVariable UUID conversationId) {
-    return ApiResponse.ok(conversationService.messages(conversationId));
+  public ApiResponse<List<Map<String, Object>>> messages(
+      @PathVariable UUID conversationId,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "50") int pageSize
+  ) {
+    int safePage = safePage(page);
+    int safePageSize = safePageSize(pageSize);
+    return ApiResponse.page(
+        conversationService.messages(conversationId, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, conversationService.messagesCount(conversationId))
+    );
   }
 
   @PostMapping("/conversations/{conversationId}/messages")
@@ -1078,8 +1175,16 @@ public class PlatformController {
   }
 
   @GetMapping("/notifications")
-  public ApiResponse<List<Map<String, Object>>> notifications() {
-    return ApiResponse.ok(notificationService.notifications());
+  public ApiResponse<List<Map<String, Object>>> notifications(
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "50") int pageSize
+  ) {
+    int safePage = safePage(page);
+    int safePageSize = safePageSize(pageSize);
+    return ApiResponse.page(
+        notificationService.notifications(safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, notificationService.notificationsCount())
+    );
   }
 
   @GetMapping("/notifications/unread-count")
@@ -1111,14 +1216,17 @@ public class PlatformController {
 
   @GetMapping("/admin/notifications")
   public ApiResponse<List<Map<String, Object>>> adminNotifications(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String type,
+      @RequestParam(required = false) String search,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
     return ApiResponse.page(
-        notificationService.adminNotifications(safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from notifications where deleted_at is null"))
+        notificationService.adminNotifications(status, type, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, notificationService.adminNotificationsCount(status, type, search))
     );
   }
 
@@ -1165,14 +1273,17 @@ public class PlatformController {
 
   @GetMapping("/admin/payments")
   public ApiResponse<List<Map<String, Object>>> adminPayments(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String gateway,
+      @RequestParam(required = false) String search,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
     return ApiResponse.page(
-        financeService.adminPayments(safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from payments"))
+        financeService.adminPayments(status, gateway, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, financeService.adminPaymentsCount(status, gateway, search))
     );
   }
 
@@ -1198,14 +1309,16 @@ public class PlatformController {
 
   @GetMapping("/admin/payouts")
   public ApiResponse<List<Map<String, Object>>> adminPayouts(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String search,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
     return ApiResponse.page(
-        financeService.adminPayouts(safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from payouts"))
+        financeService.adminPayouts(status, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, financeService.adminPayoutsCount(status, search))
     );
   }
 
@@ -1287,14 +1400,16 @@ public class PlatformController {
 
   @GetMapping("/admin/contact-requests")
   public ApiResponse<List<Map<String, Object>>> adminContacts(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String search,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
     return ApiResponse.page(
-        contactRequestService.adminContacts(safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from contact_requests"))
+        contactRequestService.adminContacts(status, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, contactRequestService.adminContactsCount(status, search))
     );
   }
 
@@ -1305,14 +1420,18 @@ public class PlatformController {
 
   @GetMapping("/admin/audit-logs")
   public ApiResponse<List<Map<String, Object>>> auditLogs(
+      @RequestParam(required = false) String search,
+      @RequestParam(required = false) String action,
+      @RequestParam(required = false) String entityType,
+      @RequestParam(required = false) String actorRole,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = safePage(page);
     int safePageSize = safePageSize(pageSize);
     return ApiResponse.page(
-        adminReportService.auditLogs(safePageSize, offset(safePage, safePageSize)),
-        PageMetadata.of(safePage, safePageSize, countSql("select count(*) from audit_logs"))
+        adminReportService.auditLogs(search, action, entityType, actorRole, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, adminReportService.auditLogsCount(search, action, entityType, actorRole))
     );
   }
 
@@ -2098,7 +2217,12 @@ public class PlatformController {
 
   private int safePageSize(int pageSize) {
     if (pageSize <= 0) return 100;
-    return Math.min(pageSize, 500);
+    return Math.min(pageSize, 200);
+  }
+
+  private int safePublicPageSize(int pageSize) {
+    if (pageSize <= 0) return 20;
+    return Math.min(pageSize, 50);
   }
 
   private int offset(int page, int pageSize) {

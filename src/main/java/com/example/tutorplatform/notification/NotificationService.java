@@ -7,6 +7,7 @@ import static com.example.tutorplatform.platform.PlatformRequestSupport.valueOr;
 
 import com.example.tutorplatform.common.BusinessException;
 import com.example.tutorplatform.db.DbService;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,23 @@ public class NotificationService {
   public List<Map<String, Object>> notifications() {
     UUID userId = db.currentUserIdOrThrow();
     return jdbc.query("select * from notifications where user_id = ? and deleted_at is null order by created_at desc limit 200", db.notificationMapper(), userId);
+  }
+
+  public List<Map<String, Object>> notifications(int limit, int offset) {
+    UUID userId = db.currentUserIdOrThrow();
+    return jdbc.query("""
+        select *
+        from notifications
+        where user_id = ? and deleted_at is null
+        order by created_at desc
+        limit ? offset ?
+        """, db.notificationMapper(), userId, limit, offset);
+  }
+
+  public long notificationsCount() {
+    UUID userId = db.currentUserIdOrThrow();
+    Long total = jdbc.queryForObject("select count(*) from notifications where user_id = ? and deleted_at is null", Long.class, userId);
+    return total == null ? 0 : total;
   }
 
   public Map<String, Object> unreadCount() {
@@ -64,6 +82,29 @@ public class NotificationService {
 
   public List<Map<String, Object>> adminNotifications(int limit, int offset) {
     return jdbc.query("select * from notifications where deleted_at is null order by created_at desc limit ? offset ?", db.notificationMapper(), limit, offset);
+  }
+
+  public List<Map<String, Object>> adminNotifications(String status, String type, String search, int limit, int offset) {
+    List<Object> args = new ArrayList<>();
+    String where = adminNotificationWhere(status, type, search, args);
+    args.add(limit);
+    args.add(offset);
+    return jdbc.query("""
+        select n.*
+        from notifications n
+        left join users u on u.id = n.user_id
+        """ + where + " order by n.created_at desc limit ? offset ?", db.notificationMapper(), args.toArray());
+  }
+
+  public long adminNotificationsCount(String status, String type, String search) {
+    List<Object> args = new ArrayList<>();
+    String where = adminNotificationWhere(status, type, search, args);
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from notifications n
+        left join users u on u.id = n.user_id
+        """ + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
   }
 
   public Map<String, Object> adminSend(Map<String, Object> body) {
@@ -138,5 +179,31 @@ public class NotificationService {
       throw new BusinessException("INVALID_NOTIFICATION_PAYLOAD", "Thiếu tiêu đề hoặc nội dung thông báo.");
     }
     return value;
+  }
+
+  private String adminNotificationWhere(String status, String type, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where n.deleted_at is null ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and n.status = ? ");
+      args.add(status);
+    }
+    if (type != null && !type.isBlank() && !"all".equals(type)) {
+      where.append(" and n.type = ? ");
+      args.add(type);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(n.title, '')) like ?
+            or lower(coalesce(n.message, '')) like ?
+            or lower(coalesce(n.entity_type, '')) like ?
+            or lower(coalesce(u.full_name, '')) like ?
+            or n.user_id::text like ?
+          )
+          """);
+      for (int i = 0; i < 5; i++) args.add(pattern);
+    }
+    return where.toString();
   }
 }

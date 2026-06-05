@@ -267,14 +267,65 @@ public class PaymentService {
     return jdbc.query("select * from payment_transactions order by created_at desc limit 500", transactionMapper());
   }
 
+  public List<Map<String, Object>> transactions(String status, String gateway, String search, int limit, int offset) {
+    permissions.require("payments.read");
+    List<Object> args = new ArrayList<>();
+    String where = transactionWhere(status, gateway, search, args);
+    args.add(limit);
+    args.add(offset);
+    return jdbc.query("select * from payment_transactions " + where + " order by created_at desc limit ? offset ?", transactionMapper(), args.toArray());
+  }
+
+  public long transactionsCount(String status, String gateway, String search) {
+    permissions.require("payments.read");
+    List<Object> args = new ArrayList<>();
+    String where = transactionWhere(status, gateway, search, args);
+    Long total = jdbc.queryForObject("select count(*) from payment_transactions " + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
+  }
+
   public List<Map<String, Object>> webhookEvents() {
     permissions.require("payments.read");
     return jdbc.query("select * from payment_webhook_events order by received_at desc limit 500", webhookEventMapper());
   }
 
+  public List<Map<String, Object>> webhookEvents(String status, String gateway, String search, int limit, int offset) {
+    permissions.require("payments.read");
+    List<Object> args = new ArrayList<>();
+    String where = webhookWhere(status, gateway, search, args);
+    args.add(limit);
+    args.add(offset);
+    return jdbc.query("select * from payment_webhook_events " + where + " order by received_at desc limit ? offset ?", webhookEventMapper(), args.toArray());
+  }
+
+  public long webhookEventsCount(String status, String gateway, String search) {
+    permissions.require("payments.read");
+    List<Object> args = new ArrayList<>();
+    String where = webhookWhere(status, gateway, search, args);
+    Long total = jdbc.queryForObject("select count(*) from payment_webhook_events " + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
+  }
+
   public List<Map<String, Object>> refunds() {
     permissions.require("payments.read");
     return jdbc.query("select * from payment_refunds order by created_at desc limit 500", refundMapper());
+  }
+
+  public List<Map<String, Object>> refunds(String status, String search, int limit, int offset) {
+    permissions.require("payments.read");
+    List<Object> args = new ArrayList<>();
+    String where = refundWhere(status, search, args);
+    args.add(limit);
+    args.add(offset);
+    return jdbc.query("select * from payment_refunds " + where + " order by created_at desc limit ? offset ?", refundMapper(), args.toArray());
+  }
+
+  public long refundsCount(String status, String search) {
+    permissions.require("payments.read");
+    List<Object> args = new ArrayList<>();
+    String where = refundWhere(status, search, args);
+    Long total = jdbc.queryForObject("select count(*) from payment_refunds " + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
   }
 
   private Map<String, Object> applyPaid(Map<String, Object> payment, String gateway, String gatewayOrderId, String gatewayTransactionId, boolean manual) {
@@ -575,6 +626,85 @@ public class PaymentService {
         where payment_id = ?
         order by updated_at desc, created_at desc limit 1
         """, (rs, row) -> rs.getString(1), paymentId).orElse("manual-tx-" + paymentId);
+  }
+
+  private String transactionWhere(String status, String gateway, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and status = ? ");
+      args.add(status);
+    }
+    if (gateway != null && !gateway.isBlank() && !"all".equals(gateway)) {
+      where.append(" and gateway = ? ");
+      args.add(gateway);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(gateway_order_id, '')) like ?
+            or lower(coalesce(gateway_transaction_id, '')) like ?
+            or coalesce(payment_id::text, '') like ?
+            or id::text like ?
+          )
+          """);
+      for (int i = 0; i < 4; i++) args.add(pattern);
+    }
+    return where.toString();
+  }
+
+  private String webhookWhere(String status, String gateway, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      switch (status) {
+        case "processed" -> where.append(" and processed = true and processing_error is null ");
+        case "failed" -> where.append(" and processing_error is not null ");
+        case "pending" -> where.append(" and processed = false ");
+        default -> {
+          where.append(" and processed = ? ");
+          args.add(Boolean.parseBoolean(status));
+        }
+      }
+    }
+    if (gateway != null && !gateway.isBlank() && !"all".equals(gateway)) {
+      where.append(" and gateway = ? ");
+      args.add(gateway);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(event_id, '')) like ?
+            or lower(coalesce(gateway_order_id, '')) like ?
+            or lower(coalesce(gateway_transaction_id, '')) like ?
+            or coalesce(payment_id::text, '') like ?
+            or id::text like ?
+          )
+          """);
+      for (int i = 0; i < 5; i++) args.add(pattern);
+    }
+    return where.toString();
+  }
+
+  private String refundWhere(String status, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and status = ? ");
+      args.add(status);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(reason, '')) like ?
+            or lower(coalesce(gateway_refund_id, '')) like ?
+            or coalesce(payment_id::text, '') like ?
+            or id::text like ?
+          )
+          """);
+      for (int i = 0; i < 4; i++) args.add(pattern);
+    }
+    return where.toString();
   }
 
   private RowMapper<Map<String, Object>> transactionMapper() {

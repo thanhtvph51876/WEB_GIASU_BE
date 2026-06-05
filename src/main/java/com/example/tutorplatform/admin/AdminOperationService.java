@@ -408,8 +408,37 @@ public class AdminOperationService {
         """, this::mapAny, limit, offset);
   }
 
+  public List<Map<String, Object>> disputes(String search, String status, String priority, String sla, String owner, int limit, int offset) {
+    List<Object> args = new ArrayList<>();
+    String where = disputeWhere(search, status, priority, sla, owner, args);
+    args.add(limit);
+    args.add(offset);
+    return jdbc.query(disputeSelect() + where + """
+        order by
+          case bd.priority when 'CRITICAL' then 0 when 'HIGH' then 1 when 'MEDIUM' then 2 else 3 end,
+          bd.sla_due_at asc nulls last,
+          bd.created_at desc
+        limit ? offset ?
+        """, this::mapAny, args.toArray());
+  }
+
   public long disputeCount() {
     Long total = jdbc.queryForObject("select count(*) from booking_disputes", Long.class);
+    return total == null ? 0 : total;
+  }
+
+  public long disputeCount(String search, String status, String priority, String sla, String owner) {
+    List<Object> args = new ArrayList<>();
+    String where = disputeWhere(search, status, priority, sla, owner, args);
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from booking_disputes bd
+        join trial_bookings tb on tb.id = bd.booking_id
+        join subjects s on s.id = tb.subject_id
+        left join users reporter on reporter.id = coalesce(bd.reporter_id, bd.opened_by)
+        left join users target on target.id = bd.target_user_id
+        left join users assignee on assignee.id = bd.assigned_admin_id
+        """ + where, Long.class, args.toArray());
     return total == null ? 0 : total;
   }
 
@@ -567,6 +596,54 @@ public class AdminOperationService {
         left join users target on target.id = bd.target_user_id
         left join users assignee on assignee.id = bd.assigned_admin_id
         """;
+  }
+
+  private String disputeWhere(String search, String status, String priority, String sla, String owner, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and bd.status = ? ");
+      args.add(canonicalDisputeStatus(status));
+    }
+    if (priority != null && !priority.isBlank() && !"all".equals(priority)) {
+      where.append(" and bd.priority = ? ");
+      args.add(priority);
+    }
+    if ("overdue".equals(sla)) {
+      where.append(" and coalesce(bd.sla_due_at, bd.created_at + interval '48 hours') < now() and bd.status not in ('RESOLVED','CLOSED','REJECTED') ");
+    } else if ("ok".equals(sla)) {
+      where.append(" and not (coalesce(bd.sla_due_at, bd.created_at + interval '48 hours') < now() and bd.status not in ('RESOLVED','CLOSED','REJECTED')) ");
+    }
+    if (owner != null && !owner.isBlank() && !"all".equals(owner)) {
+      if ("me".equals(owner)) {
+        where.append(" and bd.assigned_admin_id = ? ");
+        args.add(db.currentUserIdOrThrow());
+      } else if ("unassigned".equals(owner)) {
+        where.append(" and bd.assigned_admin_id is null ");
+      } else {
+        where.append(" and bd.assigned_admin_id = ? ");
+        args.add(UUID.fromString(owner));
+      }
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(bd.title, bd.reason, '')) like ?
+            or lower(coalesce(bd.description, bd.reason, '')) like ?
+            or lower(coalesce(bd.resolution, '')) like ?
+            or lower(coalesce(bd.resolution_note, '')) like ?
+            or lower(coalesce(reporter.full_name, '')) like ?
+            or lower(coalesce(target.full_name, '')) like ?
+            or lower(coalesce(tb.student_name, '')) like ?
+            or lower(coalesce(tb.parent_name, '')) like ?
+            or lower(coalesce(s.name, '')) like ?
+            or bd.id::text like ?
+            or bd.booking_id::text like ?
+          )
+          """);
+      for (int i = 0; i < 11; i++) args.add(pattern);
+    }
+    return where.toString();
   }
 
   private List<Map<String, Object>> disputeTimeline(UUID id) {

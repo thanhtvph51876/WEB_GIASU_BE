@@ -14,6 +14,7 @@ import com.example.tutorplatform.common.ForbiddenException;
 import com.example.tutorplatform.db.DbService;
 import com.example.tutorplatform.finance.EarningLedgerService;
 import com.example.tutorplatform.policy.StatusTransitionPolicy;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -117,6 +118,49 @@ public class ClassSessionService {
 
   public List<Map<String, Object>> adminSessions(int limit, int offset) {
     return db.sessionsPage("", limit, offset);
+  }
+
+  public List<Map<String, Object>> adminClasses(String status, String search, int limit, int offset) {
+    List<Object> args = new ArrayList<>();
+    String where = adminClassWhere(status, search, args);
+    return db.classesPage(where, limit, offset, args.toArray());
+  }
+
+  public long adminClassesCount(String status, String search) {
+    List<Object> args = new ArrayList<>();
+    String where = adminClassWhere(status, search, args);
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from tutoring_classes tc
+        join users su on su.id = tc.student_id
+        join tutor_profiles tp on tp.id = tc.tutor_id
+        join users tu on tu.id = tp.user_id
+        join subjects s on s.id = tc.subject_id
+        left join grade_levels gl on gl.id = tc.grade_level_id
+        """ + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
+  }
+
+  public List<Map<String, Object>> adminSessions(String status, String search, int limit, int offset) {
+    List<Object> args = new ArrayList<>();
+    String where = adminSessionWhere(status, search, args);
+    return db.sessionsPage(where, limit, offset, args.toArray());
+  }
+
+  public long adminSessionsCount(String status, String search) {
+    List<Object> args = new ArrayList<>();
+    String where = adminSessionWhere(status, search, args);
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from class_sessions cs
+        join tutoring_classes tc on tc.id = cs.class_id
+        join users su on su.id = cs.student_id
+        join tutor_profiles tp on tp.id = cs.tutor_id
+        join users tu on tu.id = tp.user_id
+        join subjects s on s.id = tc.subject_id
+        left join grade_levels gl on gl.id = tc.grade_level_id
+        """ + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
   }
 
   public Map<String, Object> createClass(Map<String, Object> body) {
@@ -298,5 +342,53 @@ public class ClassSessionService {
   private boolean exists(String sql, Object... args) {
     Integer count = jdbc.queryForObject("select count(*) from (" + sql + ") x", Integer.class, args);
     return count != null && count > 0;
+  }
+
+  private String adminClassWhere(String status, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and tc.status = ? ");
+      args.add(status);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(tc.title, '')) like ?
+            or lower(coalesce(su.full_name, '')) like ?
+            or lower(coalesce(tu.full_name, '')) like ?
+            or lower(coalesce(s.name, '')) like ?
+            or lower(coalesce(gl.name, '')) like ?
+          )
+          """);
+      for (int i = 0; i < 5; i++) args.add(pattern);
+    }
+    return where.toString();
+  }
+
+  private String adminSessionWhere(String status, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      if ("upcoming".equals(status)) {
+        where.append(" and cs.status in ('upcoming', 'scheduled') and cs.scheduled_start >= now() ");
+      } else {
+        where.append(" and cs.status = ? ");
+        args.add(status);
+      }
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(su.full_name, '')) like ?
+            or lower(coalesce(tu.full_name, '')) like ?
+            or lower(coalesce(s.name, '')) like ?
+            or lower(coalesce(gl.name, '')) like ?
+            or lower(coalesce(tc.title, '')) like ?
+          )
+          """);
+      for (int i = 0; i < 5; i++) args.add(pattern);
+    }
+    return where.toString();
   }
 }

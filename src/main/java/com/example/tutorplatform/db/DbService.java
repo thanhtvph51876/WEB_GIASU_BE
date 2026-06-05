@@ -501,17 +501,13 @@ public class DbService {
     String orderBy = tutorOrderBy(sort);
     args.add(pageSize);
     args.add(Math.max(0, (page - 1) * pageSize));
-    if (admin) {
-      return jdbc.query("""
-          select tp.*, u.full_name, u.avatar_url
-          from tutor_profiles tp
-          join users u on u.id = tp.user_id
-          """ + where + orderBy + " limit ? offset ?", tutorMapper(), args.toArray());
-    }
     return jdbc.query("""
         select tp.id, tp.user_id, tp.status, tp.gender, tp.headline, tp.university, tp.education, tp.major,
+               tp.student_code, tp.bio, tp.teaching_method, tp.total_students, tp.total_sessions,
+               tp.response_rate, tp.status_reason,
                tp.experience_years, tp.hourly_rate_min, tp.hourly_rate_max, tp.rating_avg, tp.rating_count,
                tp.created_at, tp.updated_at, u.full_name, u.avatar_url,
+               coalesce(class_stats.total_classes_count, 0) total_classes_count,
                coalesce((
                  select string_agg(name, '||' order by name)
                  from (
@@ -562,6 +558,11 @@ public class DbService {
                ), '[]'::jsonb)::text available_slots_json
         from tutor_profiles tp
         join users u on u.id = tp.user_id
+        left join lateral (
+          select count(*)::int total_classes_count
+          from tutoring_classes tc_count
+          where tc_count.tutor_id = tp.id
+        ) class_stats on true
         """ + where + orderBy + " limit ? offset ?", publicTutorListMapper(), args.toArray());
   }
 
@@ -847,6 +848,7 @@ public class DbService {
       m.put("faculty", valueOr(rs.getString("education"), ""));
       m.put("education", rs.getString("education"));
       m.put("major", valueOr(rs.getString("major"), ""));
+      m.put("studentCode", hasColumn(rs, "student_code") ? valueOr(rs.getString("student_code"), "") : "");
       m.put("subjects", splitAggregatedList(rs.getString("subjects_text")));
       m.put("grades", splitAggregatedList(rs.getString("grades_text")));
       m.put("experienceYears", rs.getInt("experience_years"));
@@ -861,6 +863,16 @@ public class DbService {
       m.put("ratingCount", rs.getInt("rating_count"));
       m.put("verified", "approved".equals(rs.getString("status")));
       m.put("availableSlots", jsonObjectList(rs.getString("available_slots_json")));
+      m.put("bio", hasColumn(rs, "bio") ? valueOr(rs.getString("bio"), "") : "");
+      m.put("teachingMethod", hasColumn(rs, "teaching_method") ? valueOr(rs.getString("teaching_method"), "") : "");
+      m.put("totalStudents", hasColumn(rs, "total_students") ? rs.getInt("total_students") : 0);
+      m.put("totalClasses", hasColumn(rs, "total_classes_count") ? rs.getInt("total_classes_count") : 0);
+      m.put("totalSessions", hasColumn(rs, "total_sessions") ? rs.getInt("total_sessions") : 0);
+      m.put("responseRate", hasColumn(rs, "response_rate") && rs.getBigDecimal("response_rate") != null ? rs.getBigDecimal("response_rate").doubleValue() : 0);
+      String statusReason = hasColumn(rs, "status_reason") ? rs.getString("status_reason") : null;
+      m.put("rejectReason", statusReason);
+      m.put("updateRequestNote", "need_update".equals(rs.getString("status")) ? statusReason : null);
+      m.put("suspensionReason", "suspended".equals(rs.getString("status")) ? statusReason : null);
       return m;
     };
   }

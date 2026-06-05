@@ -65,14 +65,19 @@ public class AdminOperationController {
 
   @GetMapping("/disputes")
   public ApiResponse<List<Map<String, Object>>> disputes(
+      @RequestParam(required = false) String search,
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String priority,
+      @RequestParam(required = false) String sla,
+      @RequestParam(required = false) String owner,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "100") int pageSize
   ) {
     int safePage = Math.max(1, page);
-    int safePageSize = pageSize <= 0 ? 100 : Math.min(pageSize, 500);
+    int safePageSize = pageSize <= 0 ? 100 : Math.min(pageSize, 200);
     return ApiResponse.page(
-        service.disputes(safePageSize, Math.max(0, (safePage - 1) * safePageSize)),
-        PageMetadata.of(safePage, safePageSize, service.disputeCount())
+        service.disputes(search, status, priority, sla, owner, safePageSize, Math.max(0, (safePage - 1) * safePageSize)),
+        PageMetadata.of(safePage, safePageSize, service.disputeCount(search, status, priority, sla, owner))
     );
   }
 

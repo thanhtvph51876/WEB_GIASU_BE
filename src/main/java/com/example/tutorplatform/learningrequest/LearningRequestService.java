@@ -51,6 +51,15 @@ public class LearningRequestService {
   }
 
   public List<Map<String, Object>> publicLearningRequests() {
+    return publicLearningRequests(null, null, null, null, 100, 0);
+  }
+
+  public List<Map<String, Object>> publicLearningRequests(String search, String subject, String grade, String location, int limit, int offset) {
+    List<Object> args = new ArrayList<>();
+    String where = publicLearningRequestWhere(search, subject, grade, location, args);
+    List<Object> pageArgs = new ArrayList<>(args);
+    pageArgs.add(limit);
+    pageArgs.add(offset);
     return jdbc.query("""
         select lr.id, lr.request_code, lr.student_grade, s.name subject_name, gl.name grade_name,
           lr.learning_mode, lr.province, lr.district, lr.budget_min, lr.budget_max,
@@ -58,10 +67,9 @@ public class LearningRequestService {
         from learning_requests lr
         join subjects s on s.id = lr.subject_id
         left join grade_levels gl on gl.id = lr.grade_level_id
-        where lr.public_visible = true
-          and lr.status in ('new','consulting','matched','trial_scheduled')
+        """ + where + """
         order by lr.created_at desc
-        limit 100
+        limit ? offset ?
         """, (rs, row) -> {
       Map<String, Object> m = new LinkedHashMap<>();
       m.put("id", rs.getObject("id").toString());
@@ -80,7 +88,46 @@ public class LearningRequestService {
       m.put("status", rs.getString("status"));
       m.put("createdAt", rs.getObject("created_at", OffsetDateTime.class).toString());
       return m;
-    });
+    }, pageArgs.toArray());
+  }
+
+  public long publicLearningRequestsCount(String search, String subject, String grade, String location) {
+    List<Object> args = new ArrayList<>();
+    String where = publicLearningRequestWhere(search, subject, grade, location, args);
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from learning_requests lr
+        join subjects s on s.id = lr.subject_id
+        left join grade_levels gl on gl.id = lr.grade_level_id
+        """ + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
+  }
+
+  private String publicLearningRequestWhere(String search, String subject, String grade, String location, List<Object> args) {
+    StringBuilder where = new StringBuilder("""
+        where lr.public_visible = true
+          and lr.status in ('new','consulting','matched','trial_scheduled')
+        """);
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim() + "%";
+      where.append(" and (lower(s.name) like lower(?) or lower(coalesce(gl.name, lr.student_grade)) like lower(?) or lower(coalesce(lr.province, '') || ' ' || coalesce(lr.district, '')) like lower(?)) ");
+      args.add(pattern);
+      args.add(pattern);
+      args.add(pattern);
+    }
+    if (subject != null && !subject.isBlank() && !"all".equals(subject)) {
+      where.append(" and s.name = ? ");
+      args.add(subject);
+    }
+    if (grade != null && !grade.isBlank() && !"all".equals(grade)) {
+      where.append(" and coalesce(gl.name, lr.student_grade) = ? ");
+      args.add(grade);
+    }
+    if (location != null && !location.isBlank() && !"all".equals(location)) {
+      where.append(" and lower(coalesce(lr.province, '') || ' ' || coalesce(lr.district, '')) like lower(?) ");
+      args.add("%" + location.trim() + "%");
+    }
+    return where.toString();
   }
 
   @Transactional
@@ -185,7 +232,53 @@ public class LearningRequestService {
   }
 
   public List<Map<String, Object>> adminLearningRequests(int limit, int offset) {
-    return db.learningRequestsPage("", limit, offset);
+    return adminLearningRequests(null, null, limit, offset);
+  }
+
+  public List<Map<String, Object>> adminLearningRequests(String status, String search, int limit, int offset) {
+    List<Object> args = new ArrayList<>();
+    String where = adminLearningRequestWhere(status, search, args);
+    return db.learningRequestsPage(where, limit, offset, args.toArray());
+  }
+
+  public long adminLearningRequestsCount(String status, String search) {
+    List<Object> args = new ArrayList<>();
+    String where = adminLearningRequestWhere(status, search, args);
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from learning_requests lr
+        join subjects s on s.id = lr.subject_id
+        left join grade_levels gl on gl.id = lr.grade_level_id
+        """ + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
+  }
+
+  private String adminLearningRequestWhere(String status, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and lr.status = ? ");
+      args.add(status);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim() + "%";
+      where.append("""
+          and (
+            lower(lr.request_code) like lower(?)
+            or lower(lr.student_name) like lower(?)
+            or lower(coalesce(lr.parent_name, '')) like lower(?)
+            or lower(coalesce(lr.phone, '')) like lower(?)
+            or lower(s.name) like lower(?)
+            or lower(coalesce(gl.name, lr.student_grade)) like lower(?)
+          )
+          """);
+      args.add(pattern);
+      args.add(pattern);
+      args.add(pattern);
+      args.add(pattern);
+      args.add(pattern);
+      args.add(pattern);
+    }
+    return where.toString();
   }
 
   public Map<String, Object> adminLearningRequest(UUID requestId) {

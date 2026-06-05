@@ -3,6 +3,7 @@ package com.example.tutorplatform.admin;
 import com.example.tutorplatform.db.DbService;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -131,11 +132,55 @@ public class AdminReportService {
   }
 
   public List<Map<String, Object>> auditLogs(int limit, int offset) {
+    return auditLogs(null, null, null, null, limit, offset);
+  }
+
+  public List<Map<String, Object>> auditLogs(String search, String action, String entityType, String actorRole, int limit, int offset) {
+    List<Object> args = new ArrayList<>();
+    String where = auditWhere(search, action, entityType, actorRole, args);
+    args.add(limit);
+    args.add(offset);
     return jdbc.query("""
         select al.*, u.full_name actor_name from audit_logs al
         left join users u on u.id = al.actor_id
+        """ + where + """
         order by al.created_at desc limit ? offset ?
-        """, db.auditMapper(), limit, offset);
+        """, db.auditMapper(), args.toArray());
+  }
+
+  public long auditLogsCount(String search, String action, String entityType, String actorRole) {
+    List<Object> args = new ArrayList<>();
+    String where = auditWhere(search, action, entityType, actorRole, args);
+    Long total = jdbc.queryForObject("""
+        select count(*) from audit_logs al
+        left join users u on u.id = al.actor_id
+        """ + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
+  }
+
+  private String auditWhere(String search, String action, String entityType, String actorRole, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (action != null && !action.isBlank() && !"all".equals(action)) {
+      where.append(" and al.action = ? ");
+      args.add(action);
+    }
+    if (entityType != null && !entityType.isBlank() && !"all".equals(entityType)) {
+      where.append(" and al.entity_type = ? ");
+      args.add(entityType);
+    }
+    if (actorRole != null && !actorRole.isBlank() && !"all".equals(actorRole)) {
+      where.append(" and al.actor_role = ? ");
+      args.add(actorRole);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim() + "%";
+      where.append(" and (lower(coalesce(u.full_name, '')) like lower(?) or lower(al.action) like lower(?) or lower(al.entity_type) like lower(?) or lower(coalesce(al.description, '')) like lower(?)) ");
+      args.add(pattern);
+      args.add(pattern);
+      args.add(pattern);
+      args.add(pattern);
+    }
+    return where.toString();
   }
 
   public void clearCache() {

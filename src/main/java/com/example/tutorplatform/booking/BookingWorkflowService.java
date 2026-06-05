@@ -17,6 +17,7 @@ import com.example.tutorplatform.common.ForbiddenException;
 import com.example.tutorplatform.db.DbService;
 import com.example.tutorplatform.policy.StatusTransitionPolicy;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -137,6 +138,24 @@ public class BookingWorkflowService {
 
   public List<Map<String, Object>> adminBookings(int limit, int offset) {
     return db.bookingsPage("", limit, offset);
+  }
+
+  public List<Map<String, Object>> adminBookings(String status, String search, int limit, int offset) {
+    List<Object> args = new ArrayList<>();
+    String where = adminBookingWhere(status, search, args);
+    return db.bookingsPage(where, limit, offset, args.toArray());
+  }
+
+  public long adminBookingsCount(String status, String search) {
+    List<Object> args = new ArrayList<>();
+    String where = adminBookingWhere(status, search, args);
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from trial_bookings tb
+        join subjects s on s.id = tb.subject_id
+        left join grade_levels gl on gl.id = tb.grade_level_id
+        """ + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
   }
 
   public Map<String, Object> adminBooking(UUID bookingId) {
@@ -285,5 +304,28 @@ public class BookingWorkflowService {
   private boolean exists(String sql, Object... args) {
     Integer count = jdbc.queryForObject("select count(*) from (" + sql + ") x", Integer.class, args);
     return count != null && count > 0;
+  }
+
+  private String adminBookingWhere(String status, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and tb.status = ? ");
+      args.add(status);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(tb.student_name, '')) like ?
+            or lower(coalesce(tb.parent_name, '')) like ?
+            or lower(coalesce(tb.phone, '')) like ?
+            or lower(coalesce(tb.email, '')) like ?
+            or lower(coalesce(s.name, '')) like ?
+            or lower(coalesce(gl.name, '')) like ?
+          )
+          """);
+      for (int i = 0; i < 6; i++) args.add(pattern);
+    }
+    return where.toString();
   }
 }

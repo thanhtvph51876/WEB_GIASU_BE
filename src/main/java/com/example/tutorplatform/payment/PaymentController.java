@@ -1,6 +1,7 @@
 package com.example.tutorplatform.payment;
 
 import com.example.tutorplatform.common.ApiResponse;
+import com.example.tutorplatform.common.PageMetadata;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -11,6 +12,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -59,17 +61,62 @@ public class PaymentController {
   }
 
   @GetMapping("/admin/payment-transactions")
-  public ApiResponse<List<Map<String, Object>>> paymentTransactions() {
-    return ApiResponse.ok(paymentService.transactions());
+  public ApiResponse<List<Map<String, Object>>> paymentTransactions(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String gateway,
+      @RequestParam(required = false) String search,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "100") int pageSize
+  ) {
+    int safePage = safePage(page);
+    int safePageSize = safePageSize(pageSize);
+    return ApiResponse.page(
+        paymentService.transactions(status, gateway, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, paymentService.transactionsCount(status, gateway, search))
+    );
   }
 
   @GetMapping("/admin/payment-webhook-events")
-  public ApiResponse<List<Map<String, Object>>> paymentWebhookEvents() {
-    return ApiResponse.ok(paymentService.webhookEvents());
+  public ApiResponse<List<Map<String, Object>>> paymentWebhookEvents(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String gateway,
+      @RequestParam(required = false) String search,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "100") int pageSize
+  ) {
+    int safePage = safePage(page);
+    int safePageSize = safePageSize(pageSize);
+    return ApiResponse.page(
+        paymentService.webhookEvents(status, gateway, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, paymentService.webhookEventsCount(status, gateway, search))
+    );
   }
 
   @GetMapping("/admin/refunds")
-  public ApiResponse<List<Map<String, Object>>> refunds() {
-    return ApiResponse.ok(paymentService.refunds());
+  public ApiResponse<List<Map<String, Object>>> refunds(
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String search,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "100") int pageSize
+  ) {
+    int safePage = safePage(page);
+    int safePageSize = safePageSize(pageSize);
+    return ApiResponse.page(
+        paymentService.refunds(status, search, safePageSize, offset(safePage, safePageSize)),
+        PageMetadata.of(safePage, safePageSize, paymentService.refundsCount(status, search))
+    );
+  }
+
+  private int safePage(int page) {
+    return Math.max(1, page);
+  }
+
+  private int safePageSize(int pageSize) {
+    if (pageSize <= 0) return 100;
+    return Math.min(pageSize, 200);
+  }
+
+  private int offset(int page, int pageSize) {
+    return Math.max(0, (page - 1) * pageSize);
   }
 }

@@ -99,6 +99,31 @@ public class FinanceService {
     return jdbc.query("select * from payments order by created_at desc limit ? offset ?", db.paymentMapper(), limit, offset);
   }
 
+  public List<Map<String, Object>> adminPayments(String status, String gateway, String search, int limit, int offset) {
+    permissions.require("payments.read");
+    List<Object> args = new ArrayList<>();
+    String where = paymentWhere(status, gateway, search, args);
+    args.add(limit);
+    args.add(offset);
+    return jdbc.query("""
+        select p.*
+        from payments p
+        left join users u on u.id = p.user_id
+        """ + where + " order by p.created_at desc limit ? offset ?", db.paymentMapper(), args.toArray());
+  }
+
+  public long adminPaymentsCount(String status, String gateway, String search) {
+    permissions.require("payments.read");
+    List<Object> args = new ArrayList<>();
+    String where = paymentWhere(status, gateway, search, args);
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from payments p
+        left join users u on u.id = p.user_id
+        """ + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
+  }
+
   public Map<String, Object> adminPayment(UUID paymentId) {
     permissions.require("payments.read");
     return jdbc.queryForObject("select * from payments where id = ?", db.paymentMapper(), paymentId);
@@ -134,6 +159,33 @@ public class FinanceService {
         order by p.created_at desc
         limit ? offset ?
         """, db.payoutMapper(), limit, offset);
+  }
+
+  public List<Map<String, Object>> adminPayouts(String status, String search, int limit, int offset) {
+    permissions.require("payouts.read");
+    List<Object> args = new ArrayList<>();
+    String where = payoutWhere(status, search, args);
+    args.add(limit);
+    args.add(offset);
+    return jdbc.query("""
+        select p.*, u.full_name tutor_name
+        from payouts p
+        join tutor_profiles tp on tp.id = p.tutor_id
+        join users u on u.id = tp.user_id
+        """ + where + " order by p.created_at desc limit ? offset ?", db.payoutMapper(), args.toArray());
+  }
+
+  public long adminPayoutsCount(String status, String search) {
+    permissions.require("payouts.read");
+    List<Object> args = new ArrayList<>();
+    String where = payoutWhere(status, search, args);
+    Long total = jdbc.queryForObject("""
+        select count(*)
+        from payouts p
+        join tutor_profiles tp on tp.id = p.tutor_id
+        join users u on u.id = tp.user_id
+        """ + where, Long.class, args.toArray());
+    return total == null ? 0 : total;
   }
 
   public Map<String, Object> adminPayout(UUID payoutId) {
@@ -327,5 +379,52 @@ public class FinanceService {
     String reason = firstString(body, "reason", "note", "statusReason");
     if (reason == null || reason.isBlank()) throw new BusinessException("REASON_REQUIRED", "Cần nhập lý do.");
     return reason;
+  }
+
+  private String paymentWhere(String status, String gateway, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and p.status = ? ");
+      args.add(status);
+    }
+    if (gateway != null && !gateway.isBlank() && !"all".equals(gateway)) {
+      where.append(" and p.gateway = ? ");
+      args.add(gateway);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(p.description, '')) like ?
+            or lower(coalesce(p.gateway, '')) like ?
+            or lower(coalesce(u.full_name, '')) like ?
+            or p.id::text like ?
+          )
+          """);
+      for (int i = 0; i < 4; i++) args.add(pattern);
+    }
+    return where.toString();
+  }
+
+  private String payoutWhere(String status, String search, List<Object> args) {
+    StringBuilder where = new StringBuilder(" where 1 = 1 ");
+    if (status != null && !status.isBlank() && !"all".equals(status)) {
+      where.append(" and p.status = ? ");
+      args.add(status);
+    }
+    if (search != null && !search.isBlank()) {
+      String pattern = "%" + search.trim().toLowerCase() + "%";
+      where.append("""
+          and (
+            lower(coalesce(u.full_name, '')) like ?
+            or lower(coalesce(p.bank_name, '')) like ?
+            or lower(coalesce(p.bank_account, '')) like ?
+            or lower(coalesce(p.account_holder, '')) like ?
+            or p.id::text like ?
+          )
+          """);
+      for (int i = 0; i < 5; i++) args.add(pattern);
+    }
+    return where.toString();
   }
 }
